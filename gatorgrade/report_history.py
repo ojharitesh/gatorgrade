@@ -7,7 +7,7 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Sequence, cast
 
 import platformdirs
 
@@ -278,8 +278,8 @@ def load_history_reports_with_diagnostics(
             reports.append(payload)
             if maximum_reports is not None and len(reports) >= maximum_reports:
                 break
-        elif reason is not None:
-            diagnostics.append((path, reason))
+        else:
+            diagnostics.append((path, cast(str, reason)))
     return reports, diagnostics
 
 
