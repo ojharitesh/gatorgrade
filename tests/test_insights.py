@@ -13,7 +13,7 @@ from gatorgrade.insights import (
     DIAGNOSTIC_KIND_FILE,
     DIAGNOSTIC_KIND_REPORT,
     FALLBACK_IDENTIFIER_PREFIX,
-    HISTORY_SKIP_DIFFERENT_SCOPE_REASON,
+    HISTORY_SKIP_DIFFERENT_SCOPE,
     INSIGHTS_DUPLICATE_CHECK,
     INSIGHTS_INVALID_STATUS,
     INSIGHTS_MALFORMED_REPORT,
@@ -678,7 +678,7 @@ def test_render_diagnostics_keeps_other_scopes_quiet() -> None:
         reports_available=ZERO,
         scope=SCOPE,
         file_diagnostics=[
-            (Path(FILE_NAME), HISTORY_SKIP_DIFFERENT_SCOPE_REASON),
+            (Path(FILE_NAME), HISTORY_SKIP_DIFFERENT_SCOPE),
             (Path(FILE_NAME), FILE_REASON),
         ],
     )
@@ -686,7 +686,7 @@ def test_render_diagnostics_keeps_other_scopes_quiet() -> None:
     assert lines[0] == TEXT_OTHER_SCOPE.format(ONE)
     assert len(lines) == THREE
     assert FILE_REASON in lines[2]
-    assert HISTORY_SKIP_DIFFERENT_SCOPE_REASON not in lines[2]
+    assert HISTORY_SKIP_DIFFERENT_SCOPE not in lines[2]
     assert _render_diagnostics(_build([])) == []
 
 
@@ -713,9 +713,7 @@ def test_render_text_lists_checks_ranking_and_diagnostics() -> None:
             [_check(CHECK_A, False, NAME_A), _check(CHECK_B, True, NAME_B)],
             [_check(CHECK_A, True, NAME_A), _check(CHECK_B, INVALID_STATUS)],
         ],
-        file_diagnostics=[
-            (Path(FILE_NAME), HISTORY_SKIP_DIFFERENT_SCOPE_REASON)
-        ],
+        file_diagnostics=[(Path(FILE_NAME), HISTORY_SKIP_DIFFERENT_SCOPE)],
     )
     text = render_text(report)
     assert text.endswith("\n")

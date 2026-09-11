@@ -10,6 +10,7 @@ from gatorgrade.report_history import (
     CHECKS_KEY,
     HISTORY_REPORT_KEY,
     HISTORY_SAVED_AT_KEY,
+    HISTORY_SKIP_DIFFERENT_SCOPE,
     STATUS_KEY,
 )
 
@@ -46,7 +47,7 @@ DIAGNOSTIC_KIND_CHECK = "check"
 
 # mirrors HISTORY_SKIP_DIFFERENT_SCOPE in report_history; it is kept
 # local so this module never depends on the history loader itself
-HISTORY_SKIP_DIFFERENT_SCOPE_REASON = "different_scope"
+HISTORY_SKIP_DIFFERENT_SCOPE_REASON = HISTORY_SKIP_DIFFERENT_SCOPE
 
 # labels used when building diagnostic sources and details
 REPORT_SOURCE_PREFIX = "report "
@@ -492,7 +493,7 @@ def _render_diagnostics(report: InsightsReport) -> list[str]:
     other_scope_count = 0
     visible: list[HistoryDiagnostic] = []
     for diagnostic in report.diagnostics:
-        if diagnostic.reason == HISTORY_SKIP_DIFFERENT_SCOPE_REASON:
+        if diagnostic.reason == HISTORY_SKIP_DIFFERENT_SCOPE:
             other_scope_count += 1
         else:
             visible.append(diagnostic)
