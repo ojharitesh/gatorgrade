@@ -114,6 +114,10 @@ The following options control how GatorGrade runs:
 - `--report-history-max-mb`: Set the maximum total size of automatic reports in
   MiB. The default is 100. The value must be a positive integer. Oldest history
   files are removed when either retention limit is exceeded.
+- `gatorgrade insights` (also available as `gatorgrade analyze`): Analyze the
+  saved report history instead of running checks. See
+  [Analyzing Report History](#analyzing-report-history) for its own options
+  and examples.
 - `--github-env`, `-g`: Write report data to the `GITHUB_ENV` file in GitHub
   Actions. Takes two arguments: the format (`JSON` or `MD`) and the name of the
   environment variable to set. When provided and the `GITHUB_ENV` environment
@@ -375,6 +379,145 @@ and did not fail in that report. Historical matching uses each check's exact
 `check_id`. Like `--filter-failed-last`, this status filter runs first; when
 both status filters are supplied together they intersect their matching checks,
 and any `--filter-query` text filter then narrows that intersection second.
+
+### Analyzing Report History
+
+Use the `insights` command to analyze the saved report history and see which
+checks are consistently difficult, which are improving, and which are already
+mastered. The `analyze` command is an alias that behaves identically.
+
+```bash
+gatorgrade insights --config gatorgrade.yml
+```
+
+This command only reads saved history. It never runs setup commands, executes
+checks, generates auto-hints, or modifies any history file.
+
+Give every option **after** the command name. Options placed before it belong
+to `gatorgrade` itself rather than to `insights`, so `gatorgrade --config
+custom.yml insights` analyzes the default `gatorgrade.yml` instead of
+`custom.yml`. Write `gatorgrade insights --config custom.yml` instead.
+
+The command accepts the following options:
+
+- `--config`, `-c`: The configuration file that identifies which project's
+  history to analyze. The default is `gatorgrade.yml`. The file must exist,
+  because its resolved path and optional project name determine the project
+  scope.
+- `--config-dir`, `-d`: The directory to search for the configuration file,
+  using the same search order as a normal GatorGrade run.
+- `--last`, `-l`: The number of most recent reports to analyze. The default is
+  5. The value must be a positive integer.
+- `--format`, `-f`: Either `text` for a readable summary or `json` for
+  machine-readable results. The default is `text`.
+- `--output`, `-o`: Write the analysis in the chosen format to a file. The
+  terminal still displays the readable text summary, so the command stays
+  useful when its output is redirected.
+- `--history-dir`: The directory holding the saved JSON report history. The
+  default is the platform-specific user data directory.
+
+#### Text Output
+
+```bash
+gatorgrade insights --config gatorgrade.yml --last 3
+```
+
+```text
+GatorGrade Insights
+Scope: f071015a5413db37fbd4abfba9560341d7a80c1648e6365f8b72328af9ca1967
+Reports inspected: 3 of 3 available
+
+Checks (3):
+- Use an if statement
+  id: ifstmt
+  observations: 3  passes: 3  pass rate: 100.00%
+  latest: pass  current streak: 3 passing
+  trend: insufficient-data
+- Run the tests
+  id: tests
+  observations: 2  passes: 1  pass rate: 50.00%
+  latest: pass  current streak: 1 passing
+  trend: insufficient-data
+- Complete all TODOs
+  id: todos
+  observations: 3  passes: 1  pass rate: 33.33%
+  latest: pass  current streak: 1 passing
+  trend: insufficient-data
+
+Best check: Use an if statement
+Worst check: Complete all TODOs
+
+Diagnostics (1):
+- file gatorgrade-report-20260904T000000.000000Z-bad.json: history file
+  skipped by the loader (invalid_json)
+```
+
+#### Machine-Readable Output
+
+```bash
+gatorgrade analyze --config gatorgrade.yml --format json --output insights.json
+```
+
+The JSON payload contains `scope`, `reports_inspected`, `reports_available`,
+`best_check`, `worst_check`, a `diagnostics` list, and a `checks` list. Each
+entry in `checks` records `identifier`, `name`, `observations`, `passes`,
+`pass_rate`, `latest_status`, `current_pass_streak`, `current_fail_streak`,
+`trend`, `trend_delta`, and the full `status_history`.
+
+```json
+{
+  "scope": "f071015a5413db37fbd4abfba9560341d7a80c1648e6365f8b72328af9ca1967",
+  "reports_inspected": 3,
+  "reports_available": 3,
+  "checks": [
+    {
+      "identifier": "ifstmt",
+      "name": "Use an if statement",
+      "observations": 3,
+      "passes": 3,
+      "pass_rate": 1.0,
+      "latest_status": true,
+      "current_pass_streak": 3,
+      "current_fail_streak": 0,
+      "trend": "insufficient-data",
+      "trend_delta": null,
+      "status_history": [true, true, true]
+    }
+  ],
+  "best_check": "ifstmt",
+  "worst_check": "todos",
+  "diagnostics": []
+}
+```
+
+#### How the Statistics Are Calculated
+
+The results are deterministic for a fixed set of history files, so the same
+history always produces the same output.
+
+- **Observations** count only the reports in which a check actually appears. A
+  check missing from a report is never counted as a pass and never enters the
+  pass-rate denominator, so a check seen in 2 of 10 reports reports 2
+  observations rather than 10.
+- **Pass rate** is the number of passes divided by the number of observations.
+  A check whose recorded status is unreadable counts as an observation that did
+  not pass, and a diagnostic explains why.
+- **Streaks** are counted back from the newest observation, skipping reports in
+  which the check did not appear, so a newly added check does not inherit a
+  streak from before it existed.
+- **Trend** compares the pass rate of the older half of the observations with
+  the newer half, and needs at least 4 observations. The newer half receives
+  the extra observation when the count is odd. A change larger than 0.05 is
+  reported as `improving` or `declining`, and anything smaller is `stable`.
+  Fewer than 4 observations reports `insufficient-data`.
+- **Best and worst checks** consider only checks with at least 2 observations,
+  and are `none` when no check qualifies. Ties are broken by more observations,
+  then by the longer relevant streak, then by identifier in ascending order.
+  Weighted scores are not used.
+- **Diagnostics** explain every file, report, or check entry that was skipped.
+  Reports belonging to a different project scope are summarized as a single
+  count rather than listed individually, because history from other projects
+  shares the same directory.
 
 ### File Reports
 

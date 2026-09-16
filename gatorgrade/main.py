@@ -2,6 +2,7 @@
 
 import importlib.metadata
 import sys
+from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -44,8 +45,14 @@ from gatorgrade.input.parse_config import (
     parse_config,
     resolve_config_path,
 )
+from gatorgrade.insights import (
+    build_insights_report,
+    render_json,
+    render_text,
+)
 from gatorgrade.output.output import run_checks
 from gatorgrade.report_history import (
+    DEFAULT_HISTORY_QUERY_COUNT,
     DEFAULT_HISTORY_REPORT_COUNT,
     DEFAULT_HISTORY_SIZE_MIB,
     filter_checks_by_failed_ids,
@@ -53,6 +60,7 @@ from gatorgrade.report_history import (
     get_failed_check_ids,
     get_history_scope,
     get_report_history_directory,
+    load_history_reports_with_diagnostics,
 )
 from gatorgrade.resolve import (
     resolve_system_prompt,
@@ -66,6 +74,8 @@ from gatorgrade.validate import (
     validate_filter_options,
     validate_filter_passed_last,
     validate_github_env,
+    validate_insights_last,
+    validate_insights_output,
     validate_output_limit,
     validate_report,
     validate_report_history_count,
@@ -171,6 +181,26 @@ GATORGRADER_VERSION_KEY = "gatorgrader_version"
 PYTHON_INFO_KEY = "python_info"
 PLATFORM_INFO_KEY = "platform_info"
 OS_RELEASE_KEY = "os_release"
+
+# names, defaults, and messages for the insights command
+INSIGHTS_COMMAND_NAME = "insights"
+ANALYZE_COMMAND_NAME = "analyze"
+ANALYZE_HELP = "Alias for the insights command."
+INSIGHTS_DEFAULT_LAST = DEFAULT_HISTORY_QUERY_COUNT
+INSIGHTS_FILE_ENCODING = "utf-8"
+INSIGHTS_CONFIG_MISSING_FMT = (
+    "The configuration file {} does not exist; "
+    "insights needs it to identify this project."
+)
+INSIGHTS_WROTE_FMT = "Wrote {} insights to {}"
+INSIGHTS_WRITE_ERROR_FMT = "Could not write the insights file {}: {}"
+
+
+class InsightsFormat(str, Enum):
+    """Represent the output formats supported by the insights command."""
+
+    TEXT = "text"
+    JSON = "json"
 
 
 def _version_callback(value: bool) -> None:
@@ -977,6 +1007,176 @@ def gatorgrade(  # noqa: PLR0912, PLR0913, PLR0915
         # code to designate some type of failure
         if checks_status is not True:
             sys.exit(FAILURE)
+
+
+def _echo_insights(payload: str) -> None:
+    """Display rendered insights exactly as they were produced."""
+    # markup, emoji, and highlighting are disabled so that punctuation
+    # inside a check description is never reinterpreted, and soft
+    # wrapping is enabled so that terminal width cannot fold a long
+    # line and invalidate the JSON that was requested
+    console.print(
+        payload.rstrip(NEWLINE),
+        markup=False,
+        emoji=False,
+        highlight=False,
+        soft_wrap=True,
+    )
+
+
+def _resolve_insights_config(
+    config: Path,
+    config_dir: Optional[Path],
+) -> Path:
+    """Return the resolved configuration path or exit when it is missing."""
+    resolved_config = resolve_config_path(config, config_dir)
+    if not resolved_config.is_file():
+        console.print()
+        console.print(Rule(CONFIG_ERROR_LABEL, style="bright_red"))
+        console.print()
+        console.print(INSIGHTS_CONFIG_MISSING_FMT.format(resolved_config))
+        console.print()
+        console.print(Rule(style="bright_red"))
+        raise typer.Exit(FAILURE)
+    return resolved_config
+
+
+def _write_insights_file(
+    output_file: Path,
+    contents: str,
+    output_format: InsightsFormat,
+) -> None:
+    """Write rendered insights to a file and confirm on the terminal."""
+    try:
+        output_file.write_text(contents, encoding=INSIGHTS_FILE_ENCODING)
+    except OSError as error:
+        console.print(
+            INSIGHTS_WRITE_ERROR_FMT.format(output_file, error),
+            style="bright_red",
+        )
+        raise typer.Exit(FAILURE) from error
+    console.print(
+        INSIGHTS_WROTE_FMT.format(output_format.value, output_file),
+        style="green",
+    )
+
+
+def _run_insights(  # noqa: PLR0913
+    config: Path,
+    config_dir: Optional[Path],
+    last: int,
+    output_format: InsightsFormat,
+    output_file: Optional[Path],
+    history_dir: Path,
+) -> None:
+    """Analyze saved report history without running any checks."""
+    resolved_config = _resolve_insights_config(config, config_dir)
+    history_scope = get_history_scope(
+        resolved_config,
+        get_project_name(resolved_config),
+    )
+    # load the whole in-scope history a single time and then slice it;
+    # asking the loader for a capped set and then asking again for the
+    # total would read and parse every history file twice per run
+    payloads, file_diagnostics = load_history_reports_with_diagnostics(
+        history_dir,
+        history_scope,
+    )
+    report = build_insights_report(
+        payloads[:last],
+        reports_available=len(payloads),
+        scope=history_scope,
+        file_diagnostics=file_diagnostics,
+    )
+    text_view = render_text(report)
+    selected_view = (
+        render_json(report)
+        if output_format is InsightsFormat.JSON
+        else text_view
+    )
+    if output_file is None:
+        _echo_insights(selected_view)
+        return
+    # show the readable summary first so that the confirmation of the
+    # written file remains the final line displayed in the terminal
+    _echo_insights(text_view)
+    _write_insights_file(
+        output_file,
+        selected_view.rstrip(NEWLINE) + NEWLINE,
+        output_format,
+    )
+
+
+def _insights_entry(  # noqa: PLR0913
+    config: Path = typer.Option(
+        FILE,
+        "--config",
+        "-c",
+        help="Name of the configuration file in YML format.",
+    ),
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        "-d",
+        help=(
+            "Directory for the configuration file that identifies"
+            " which project's report history to analyze."
+        ),
+        show_default=DEFAULT_CONFIG_DIR,
+    ),
+    last: int = typer.Option(
+        INSIGHTS_DEFAULT_LAST,
+        "--last",
+        "-l",
+        help="Number of the most recent reports to analyze (>= 1).",
+        show_default=True,
+        callback=validate_insights_last,
+    ),
+    output_format: InsightsFormat = typer.Option(
+        InsightsFormat.TEXT,
+        "--format",
+        "-f",
+        help=(
+            "Output format with [blue]text[/blue] for a readable summary"
+            " or [blue]json[/blue] for machine-readable results."
+        ),
+        show_default=True,
+    ),
+    output_file: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help=(
+            "Write the analysis in the chosen format to this file; the"
+            " terminal still displays the readable text summary."
+        ),
+        callback=validate_insights_output,
+    ),
+    history_dir: Path = typer.Option(
+        get_report_history_directory(),
+        "--history-dir",
+        help="Directory that holds the saved JSON report history.",
+        show_default=DEFAULT_REPORT_HISTORY_DIR,
+    ),
+) -> None:
+    """Analyze report history for pass rates, streaks, and check trends."""
+    _run_insights(
+        config,
+        config_dir,
+        last,
+        output_format,
+        output_file,
+        history_dir,
+    )
+
+
+# register the same analysis entry point under two names so that the
+# feature is discoverable as either gatorgrade insights or as the
+# gatorgrade analyze alias; the alias overrides the shared docstring so
+# that the help menu shows the two names as one command and not as two
+# unrelated commands that happen to behave the same way
+app.command(INSIGHTS_COMMAND_NAME)(_insights_entry)
+app.command(ANALYZE_COMMAND_NAME, help=ANALYZE_HELP)(_insights_entry)
 
 
 if __name__ == "__main__":

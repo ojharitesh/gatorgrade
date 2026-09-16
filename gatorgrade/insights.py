@@ -45,10 +45,6 @@ DIAGNOSTIC_KIND_FILE = "file"
 DIAGNOSTIC_KIND_REPORT = "report"
 DIAGNOSTIC_KIND_CHECK = "check"
 
-# mirrors HISTORY_SKIP_DIFFERENT_SCOPE in report_history; it is kept
-# local so this module never depends on the history loader itself
-HISTORY_SKIP_DIFFERENT_SCOPE_REASON = HISTORY_SKIP_DIFFERENT_SCOPE
-
 # labels used when building diagnostic sources and details
 REPORT_SOURCE_PREFIX = "report "
 FILE_SKIPPED_DETAIL = "history file skipped by the loader"
