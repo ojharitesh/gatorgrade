@@ -421,3 +421,29 @@ def validate_github_env(
         if errors:
             raise BadParameter(";\n".join(errors))
     return value
+
+
+# error messages for the insights command options
+INSIGHTS_LAST_ERR_FMT = (
+    "Insights report count must be a positive integer, got {}"
+)
+INSIGHTS_OUTPUT_DIRECTORY_ERR_FMT = "Output path is a directory: {}"
+INSIGHTS_OUTPUT_PARENT_ERR_FMT = "Output directory does not exist: {}"
+
+
+def validate_insights_last(value: int) -> int:
+    """Validate the number of recent reports to analyze for insights."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise BadParameter(INSIGHTS_LAST_ERR_FMT.format(value))
+    return value
+
+
+def validate_insights_output(value: Optional[Path]) -> Optional[Path]:
+    """Validate the optional output file path for insights results."""
+    if value is None:
+        return None
+    if value.is_dir():
+        raise BadParameter(INSIGHTS_OUTPUT_DIRECTORY_ERR_FMT.format(value))
+    if not value.parent.exists():
+        raise BadParameter(INSIGHTS_OUTPUT_PARENT_ERR_FMT.format(value.parent))
+    return value
