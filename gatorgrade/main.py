@@ -46,7 +46,6 @@ from gatorgrade.input.parse_config import (
     resolve_config_path,
 )
 from gatorgrade.insights import (
-    TEXT_TITLE,
     build_insights_report,
     render_json,
     render_text,
@@ -191,6 +190,10 @@ INSIGHTS_DEFAULT_LAST = DEFAULT_HISTORY_QUERY_COUNT
 INSIGHTS_FILE_ENCODING = "utf-8"
 INSIGHTS_HEADING_STYLE = "bold"
 INSIGHTS_HEADING_LINES = 3
+# a rendered JSON payload always opens with an object brace, which is
+# how the readable report is told apart from output that must reach the
+# terminal exactly as it was rendered
+INSIGHTS_JSON_START = "{"
 INSIGHTS_TITLE_STYLES = (
     ("GatorGrade", "bold green"),
     ("Insights", "bold yellow"),
@@ -1032,12 +1035,15 @@ def _echo_insights(payload: str) -> None:
     # wrapping is enabled so that terminal width cannot fold a long
     # line and invalidate the JSON that was requested
     display = Text(payload.rstrip(NEWLINE))
-    if payload.startswith(NEWLINE + TEXT_TITLE + NEWLINE):
+    if not payload.lstrip().startswith(INSIGHTS_JSON_START):
         heading = NEWLINE.join(payload.splitlines()[:INSIGHTS_HEADING_LINES])
         display.stylize(INSIGHTS_HEADING_STYLE, end=len(heading))
+        # locate each highlighted word inside the heading itself so that
+        # the styling keeps working if the title text is ever reworded
         for word, style in INSIGHTS_TITLE_STYLES:
-            start = len(NEWLINE) + TEXT_TITLE.index(word)
-            display.stylize(style, start=start, end=start + len(word))
+            start = heading.find(word)
+            if start >= 0:
+                display.stylize(style, start=start, end=start + len(word))
         for pattern, style in INSIGHTS_TABLE_STYLES:
             display.highlight_regex(pattern, style=style)
     console.print(

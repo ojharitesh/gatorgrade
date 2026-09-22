@@ -92,6 +92,10 @@ WHITESPACE_PATTERN = re.compile(r"\s+")
 SPACE = " "
 EMPTY_TEXT = ""
 WINDOWS_ENCODING = "cp1252"
+# an empty newline setting stops the wrapper from translating a line feed
+# into the platform line ending, which would otherwise make this
+# comparison pass on Linux and fail on Windows
+UNTRANSLATED_NEWLINE = ""
 NARROW_TERMINAL_WIDTH = 40
 COLOR_SYSTEM: Literal["standard"] = "standard"
 CONSOLE_ATTRIBUTE = "console"
@@ -129,7 +133,11 @@ def test_echo_insights_redirects_tables_to_cp1252_without_styling(
     """Narrow redirected Windows streams preserve the exact ASCII report."""
     payload = main.render_text(_display_report(), instructor=instructor)
     buffer = BytesIO()
-    with TextIOWrapper(buffer, encoding=WINDOWS_ENCODING) as stream:
+    with TextIOWrapper(
+        buffer,
+        encoding=WINDOWS_ENCODING,
+        newline=UNTRANSLATED_NEWLINE,
+    ) as stream:
         monkeypatch.setattr(
             main,
             CONSOLE_ATTRIBUTE,
