@@ -188,6 +188,25 @@ ANALYZE_COMMAND_NAME = "analyze"
 ANALYZE_HELP = "Alias for the insights command."
 INSIGHTS_DEFAULT_LAST = DEFAULT_HISTORY_QUERY_COUNT
 INSIGHTS_FILE_ENCODING = "utf-8"
+INSIGHTS_HEADING_STYLE = "bold"
+INSIGHTS_HEADING_LINES = 3
+# a rendered JSON payload always opens with an object brace, which is
+# how the readable report is told apart from output that must reach the
+# terminal exactly as it was rendered
+INSIGHTS_JSON_START = "{"
+INSIGHTS_TITLE_STYLES = (
+    ("GatorGrade", "bold green"),
+    ("Insights", "bold yellow"),
+)
+INSIGHTS_TABLE_STYLES = (
+    (r"(?m)^FOCUS ON THESE.*$", "bold yellow"),
+    (r"(?m)^ALL CHECKS.*$", "bold cyan"),
+    (r"(?m)^\| RATE .*\|$", "bold cyan"),
+    (r"(?m)^\+[-+]+\+$", "dim"),
+    (r"(?<=\| )(?:pass|improving|100%)(?= +\|)", "bold green"),
+    (r"(?<=\| )(?:fail|declining)(?= +\|)", "bold red"),
+    (r"(?<=\| )\d+ failing(?: in a row)?(?= +\|)", "bold red"),
+)
 INSIGHTS_CONFIG_MISSING_FMT = (
     "The configuration file {} does not exist; "
     "insights needs it to identify this project."
@@ -1010,13 +1029,25 @@ def gatorgrade(  # noqa: PLR0912, PLR0913, PLR0915
 
 
 def _echo_insights(payload: str) -> None:
-    """Display rendered insights exactly as they were produced."""
+    """Display insights with colored text headings and unchanged JSON."""
     # markup, emoji, and highlighting are disabled so that punctuation
     # inside a check description is never reinterpreted, and soft
     # wrapping is enabled so that terminal width cannot fold a long
     # line and invalidate the JSON that was requested
+    display = Text(payload.rstrip(NEWLINE))
+    if not payload.lstrip().startswith(INSIGHTS_JSON_START):
+        heading = NEWLINE.join(payload.splitlines()[:INSIGHTS_HEADING_LINES])
+        display.stylize(INSIGHTS_HEADING_STYLE, end=len(heading))
+        # locate each highlighted word inside the heading itself so that
+        # the styling keeps working if the title text is ever reworded
+        for word, style in INSIGHTS_TITLE_STYLES:
+            start = heading.find(word)
+            if start >= 0:
+                display.stylize(style, start=start, end=start + len(word))
+        for pattern, style in INSIGHTS_TABLE_STYLES:
+            display.highlight_regex(pattern, style=style)
     console.print(
-        payload.rstrip(NEWLINE),
+        display,
         markup=False,
         emoji=False,
         highlight=False,
