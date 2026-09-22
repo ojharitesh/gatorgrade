@@ -46,6 +46,7 @@ from gatorgrade.input.parse_config import (
     resolve_config_path,
 )
 from gatorgrade.insights import (
+    TEXT_TITLE,
     build_insights_report,
     render_json,
     render_text,
@@ -188,6 +189,21 @@ ANALYZE_COMMAND_NAME = "analyze"
 ANALYZE_HELP = "Alias for the insights command."
 INSIGHTS_DEFAULT_LAST = DEFAULT_HISTORY_QUERY_COUNT
 INSIGHTS_FILE_ENCODING = "utf-8"
+INSIGHTS_HEADING_STYLE = "bold"
+INSIGHTS_HEADING_LINES = 3
+INSIGHTS_TITLE_STYLES = (
+    ("GatorGrade", "bold green"),
+    ("Insights", "bold yellow"),
+)
+INSIGHTS_TABLE_STYLES = (
+    (r"(?m)^FOCUS ON THESE.*$", "bold yellow"),
+    (r"(?m)^ALL CHECKS.*$", "bold cyan"),
+    (r"(?m)^\| RATE .*\|$", "bold cyan"),
+    (r"(?m)^\+[-+]+\+$", "dim"),
+    (r"(?<=\| )(?:pass|improving|100%)(?= +\|)", "bold green"),
+    (r"(?<=\| )(?:fail|declining)(?= +\|)", "bold red"),
+    (r"(?<=\| )\d+ failing(?: in a row)?(?= +\|)", "bold red"),
+)
 INSIGHTS_CONFIG_MISSING_FMT = (
     "The configuration file {} does not exist; "
     "insights needs it to identify this project."
@@ -1010,13 +1026,22 @@ def gatorgrade(  # noqa: PLR0912, PLR0913, PLR0915
 
 
 def _echo_insights(payload: str) -> None:
-    """Display rendered insights exactly as they were produced."""
+    """Display insights with colored text headings and unchanged JSON."""
     # markup, emoji, and highlighting are disabled so that punctuation
     # inside a check description is never reinterpreted, and soft
     # wrapping is enabled so that terminal width cannot fold a long
     # line and invalidate the JSON that was requested
+    display = Text(payload.rstrip(NEWLINE))
+    if payload.startswith(NEWLINE + TEXT_TITLE + NEWLINE):
+        heading = NEWLINE.join(payload.splitlines()[:INSIGHTS_HEADING_LINES])
+        display.stylize(INSIGHTS_HEADING_STYLE, end=len(heading))
+        for word, style in INSIGHTS_TITLE_STYLES:
+            start = len(NEWLINE) + TEXT_TITLE.index(word)
+            display.stylize(style, start=start, end=start + len(word))
+        for pattern, style in INSIGHTS_TABLE_STYLES:
+            display.highlight_regex(pattern, style=style)
     console.print(
-        payload.rstrip(NEWLINE),
+        display,
         markup=False,
         emoji=False,
         highlight=False,

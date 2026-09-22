@@ -3,12 +3,14 @@
 import datetime
 import json
 import re
+from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 import typer
 from click import BadParameter
+from rich.console import Console
 from typer.testing import CliRunner
 
 from gatorgrade import main
@@ -20,7 +22,11 @@ from gatorgrade.main import (
     _write_insights_file,
     app,
 )
-from gatorgrade.report_history import get_history_scope, save_report_history
+from gatorgrade.report_history import (
+    HISTORY_REPORT_KEY,
+    get_history_scope,
+    save_report_history,
+)
 from gatorgrade.validate import (
     validate_insights_last,
     validate_insights_output,
@@ -84,11 +90,108 @@ ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 BORDER_PATTERN = re.compile("[─-╿|]")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 SPACE = " "
+EMPTY_TEXT = ""
+WINDOWS_ENCODING = "cp1252"
+NARROW_TERMINAL_WIDTH = 40
+COLOR_SYSTEM: Literal["standard"] = "standard"
+CONSOLE_ATTRIBUTE = "console"
+MARKUP_NAME = "[bold]Review caf\u00e9 notes[/bold] :smile:"
+GREEN_TITLE = "\x1b[1;32mGatorGrade"
+YELLOW_TITLE = "\x1b[1;33mInsights"
+GREEN_PASS = "\x1b[1;32mpass"
+RED_FAIL = "\x1b[1;31mfail"
+
+
+def _display_report() -> InsightsReport:
+    """Create a report with pass, fail, Unicode, and markup-like text."""
+    return main.build_insights_report(
+        [
+            {
+                HISTORY_REPORT_KEY: {
+                    CHECKS_KEY: [
+                        _check(CHECK_ALPHA, False, MARKUP_NAME),
+                        _check(CHECK_BETA, True, NAME_BETA),
+                    ]
+                }
+            }
+        ],
+        reports_available=ONE,
+        scope=PROJECT_NAME,
+        file_diagnostics=[],
+    )
+
+
+@pytest.mark.parametrize("instructor", [False, True])
+def test_echo_insights_redirects_tables_to_cp1252_without_styling(
+    monkeypatch: pytest.MonkeyPatch,
+    instructor: bool,
+) -> None:
+    """Narrow redirected Windows streams preserve the exact ASCII report."""
+    payload = main.render_text(_display_report(), instructor=instructor)
+    buffer = BytesIO()
+    with TextIOWrapper(buffer, encoding=WINDOWS_ENCODING) as stream:
+        monkeypatch.setattr(
+            main,
+            CONSOLE_ATTRIBUTE,
+            Console(
+                file=stream,
+                force_terminal=False,
+                width=NARROW_TERMINAL_WIDTH,
+            ),
+        )
+        main._echo_insights(payload)
+        stream.flush()
+        assert buffer.getvalue() == payload.encode(WINDOWS_ENCODING)
+
+
+def test_echo_insights_colors_tables_without_changing_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal styling colors titles and statuses without interpreting names."""
+    payload = main.render_text(_display_report())
+    stream = StringIO()
+    monkeypatch.setattr(
+        main,
+        CONSOLE_ATTRIBUTE,
+        Console(
+            file=stream,
+            force_terminal=True,
+            no_color=False,
+            color_system=COLOR_SYSTEM,
+            width=NARROW_TERMINAL_WIDTH,
+        ),
+    )
+    main._echo_insights(payload)
+    output = stream.getvalue()
+    assert ANSI_PATTERN.sub(EMPTY_TEXT, output) == payload
+    for colored_text in (GREEN_TITLE, YELLOW_TITLE, GREEN_PASS, RED_FAIL):
+        assert colored_text in output
+
+
+def test_echo_insights_keeps_json_raw_in_color_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Color support never adds ANSI codes or wrapping to JSON."""
+    payload = main.render_json(_display_report())
+    stream = StringIO()
+    monkeypatch.setattr(
+        main,
+        CONSOLE_ATTRIBUTE,
+        Console(
+            file=stream,
+            force_terminal=True,
+            no_color=False,
+            color_system=COLOR_SYSTEM,
+            width=NARROW_TERMINAL_WIDTH,
+        ),
+    )
+    main._echo_insights(payload)
+    assert stream.getvalue().rstrip() == payload
 
 
 def _plain(text: str) -> str:
     """Return CLI output without styling, borders, or wrapped line breaks."""
-    without_styling = ANSI_PATTERN.sub(SPACE, text)
+    without_styling = ANSI_PATTERN.sub(EMPTY_TEXT, text)
     without_borders = BORDER_PATTERN.sub(SPACE, without_styling)
     return WHITESPACE_PATTERN.sub(SPACE, without_borders)
 
@@ -249,7 +352,7 @@ def test_insights_command_renders_a_text_summary(tmp_path: Path) -> None:
         str(history_dir),
     )
     assert result.exit_code == EXIT_SUCCESS
-    assert TITLE_TEXT in result.stdout
+    assert TITLE_TEXT in _plain(result.stdout)
     assert NAME_ALPHA in result.stdout
     assert NAME_BETA in result.stdout
 
@@ -348,10 +451,18 @@ def test_insights_command_limits_the_inspected_reports(
     assert report.reports_available == THREE
 
 
+@pytest.mark.parametrize("enable_color", [False, True])
 def test_insights_command_writes_a_file_and_keeps_terminal_output(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enable_color: bool,
 ) -> None:
     """Writing a file still prints the summary and a confirmation line."""
+    monkeypatch.setattr(
+        main,
+        CONSOLE_ATTRIBUTE,
+        Console(force_terminal=enable_color, no_color=not enable_color),
+    )
     config_path, history_dir = _project(tmp_path)
     destination = tmp_path / OUTPUT_NAME
     result = _invoke(
@@ -366,7 +477,7 @@ def test_insights_command_writes_a_file_and_keeps_terminal_output(
         str(destination),
     )
     assert result.exit_code == EXIT_SUCCESS
-    assert TITLE_TEXT in result.stdout
+    assert TITLE_TEXT in _plain(result.stdout)
     assert WROTE_TEXT in result.stdout
     written = json.loads(destination.read_text(encoding=ENCODING))
     assert written["reports_inspected"] == THREE
@@ -541,4 +652,4 @@ def test_insights_command_runs_no_checks_or_configuration_parsing(
         str(history_dir),
     )
     assert result.exit_code == EXIT_SUCCESS
-    assert TITLE_TEXT in result.stdout
+    assert TITLE_TEXT in _plain(result.stdout)
