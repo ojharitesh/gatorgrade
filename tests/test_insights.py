@@ -706,6 +706,12 @@ def test_render_text_reports_history_without_checks() -> None:
     assert TEXT_NO_REPORTS not in text
 
 
+def test_render_text_accepts_the_instructor_parameter() -> None:
+    """The instructor parameter is accepted by the rendering contract."""
+    report = _build([[_check(CHECK_A, True, NAME_A)]])
+    assert render_text(report, instructor=True).startswith(TEXT_TITLE)
+
+
 def test_render_text_lists_checks_ranking_and_diagnostics() -> None:
     """A full report renders every section in a fixed layout."""
     report = _build(

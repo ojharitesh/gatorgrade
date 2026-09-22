@@ -510,8 +510,15 @@ def _render_diagnostics(report: InsightsReport) -> list[str]:
     return lines
 
 
-def render_text(report: InsightsReport) -> str:
+def render_text(
+    report: InsightsReport,
+    *,
+    instructor: bool = False,
+) -> str:
     """Render an insights report as deterministic plain text."""
+    # the instructor parameter is accepted now so that the command line can
+    # pass it through while the detailed rendering is still being written;
+    # it is deliberately ignored until that rendering lands
     lines = [
         TEXT_TITLE,
         TEXT_SCOPE.format(report.scope),
