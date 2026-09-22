@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import typer
+from click.core import ParameterSource
+from pydantic import ValidationError
 from rich.console import Console
 from rich.emoji import Emoji
 from rich.rule import Rule
@@ -46,6 +48,7 @@ from gatorgrade.input.parse_config import (
     resolve_config_path,
 )
 from gatorgrade.insights import (
+    InsightsReport,
     build_insights_report,
     render_json,
     render_text,
@@ -74,8 +77,10 @@ from gatorgrade.validate import (
     validate_filter_options,
     validate_filter_passed_last,
     validate_github_env,
+    validate_insights_input,
     validate_insights_last,
     validate_insights_output,
+    validate_insights_output_dir,
     validate_output_limit,
     validate_report,
     validate_report_history_count,
@@ -213,6 +218,29 @@ INSIGHTS_CONFIG_MISSING_FMT = (
 )
 INSIGHTS_WROTE_FMT = "Wrote {} insights to {}"
 INSIGHTS_WRITE_ERROR_FMT = "Could not write the insights file {}: {}"
+INSIGHTS_READ_ERROR_FMT = "Could not read the insights file {}: {}"
+INSIGHTS_INVALID_FMT = (
+    "The file {} is not a valid insights report; "
+    "regenerate it with the insights command."
+)
+INSIGHTS_LAST_FLAG = "--last"
+INSIGHTS_HISTORY_DIR_FLAG = "--history-dir"
+INSIGHTS_OUTPUT_FLAG = "--output"
+INSIGHTS_OUTPUT_DIR_FLAG = "--output-dir"
+INSIGHTS_SAVE_FLAG = "--save"
+INSIGHTS_INPUT_FLAG = "--input"
+# a saved report lands in a predictable directory that is created on
+# demand, so that an assignment can require the file at a known path
+INSIGHTS_DEFAULT_OUTPUT_DIR = Path("insights")
+INSIGHTS_SAVE_CONFLICT_FMT = (
+    "The {} option writes to a chosen path and cannot be combined with {}."
+)
+INSIGHTS_LAST_PARAMETER = "last"
+INSIGHTS_HISTORY_DIR_PARAMETER = "history_dir"
+INSIGHTS_INPUT_CONFLICT_FMT = (
+    "The {} option analyzes a saved report and cannot be combined with {}."
+)
+INSIGHTS_CONFLICT_SEPARATOR = " or "
 
 
 class InsightsFormat(str, Enum):
@@ -220,6 +248,14 @@ class InsightsFormat(str, Enum):
 
     TEXT = "text"
     JSON = "json"
+
+
+# the saved file is named for the format it holds so that a text report
+# and a machine-readable report can sit in the directory together
+INSIGHTS_SAVE_NAMES = {
+    InsightsFormat.TEXT: "insights.txt",
+    InsightsFormat.JSON: "insights.json",
+}
 
 
 def _version_callback(value: bool) -> None:
@@ -1079,6 +1115,9 @@ def _write_insights_file(
 ) -> None:
     """Write rendered insights to a file and confirm on the terminal."""
     try:
+        # create the containing directory on demand so that a saved report
+        # can land in a conventional folder that is not committed yet
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_text(contents, encoding=INSIGHTS_FILE_ENCODING)
     except OSError as error:
         console.print(
@@ -1092,14 +1131,86 @@ def _write_insights_file(
     )
 
 
-def _run_insights(  # noqa: PLR0913
+def _load_insights_report(input_file: Path) -> InsightsReport:
+    """Load a previously saved insights report or exit when it is invalid."""
+    try:
+        contents = input_file.read_text(encoding=INSIGHTS_FILE_ENCODING)
+    except (OSError, UnicodeDecodeError) as error:
+        console.print(
+            INSIGHTS_READ_ERROR_FMT.format(input_file, error),
+            style="bright_red",
+        )
+        raise typer.Exit(FAILURE) from error
+    # a saved report is validated through the same model that produced it,
+    # so unparsable JSON, a missing field, and a field of the wrong type are
+    # all rejected here rather than surfacing later as a confusing traceback
+    try:
+        return InsightsReport.model_validate_json(contents)
+    except ValidationError as error:
+        console.print(
+            INSIGHTS_INVALID_FMT.format(input_file),
+            style="bright_red",
+        )
+        raise typer.Exit(FAILURE) from error
+
+
+def _insights_destination(
+    output_file: Optional[Path],
+    save: bool,
+    output_dir: Path,
+    output_format: InsightsFormat,
+) -> Optional[Path]:
+    """Return where a report should be written, or None to only display it."""
+    if output_file is not None:
+        return output_file
+    if save:
+        return output_dir / INSIGHTS_SAVE_NAMES[output_format]
+    return None
+
+
+def _reject_insights_conflict(first: str, second: str) -> None:
+    """Exit because two options that both choose a destination were given."""
+    console.print()
+    console.print(Rule(CONFIG_ERROR_LABEL, style="bright_red"))
+    console.print()
+    console.print(INSIGHTS_SAVE_CONFLICT_FMT.format(first, second))
+    console.print()
+    console.print(Rule(style="bright_red"))
+    raise typer.Exit(FAILURE)
+
+
+def _reject_insights_input_conflicts(ctx: typer.Context) -> None:
+    """Exit when history options accompany a saved report to analyze."""
+    conflicting = [
+        flag
+        for parameter, flag in (
+            (INSIGHTS_LAST_PARAMETER, INSIGHTS_LAST_FLAG),
+            (INSIGHTS_HISTORY_DIR_PARAMETER, INSIGHTS_HISTORY_DIR_FLAG),
+        )
+        if ctx.get_parameter_source(parameter) == ParameterSource.COMMANDLINE
+    ]
+    if not conflicting:
+        return
+    console.print()
+    console.print(Rule(CONFIG_ERROR_LABEL, style="bright_red"))
+    console.print()
+    console.print(
+        INSIGHTS_INPUT_CONFLICT_FMT.format(
+            INSIGHTS_INPUT_FLAG,
+            INSIGHTS_CONFLICT_SEPARATOR.join(conflicting),
+        )
+    )
+    console.print()
+    console.print(Rule(style="bright_red"))
+    raise typer.Exit(FAILURE)
+
+
+def _build_history_insights(
     config: Path,
     config_dir: Optional[Path],
     last: int,
-    output_format: InsightsFormat,
-    output_file: Optional[Path],
     history_dir: Path,
-) -> None:
+) -> InsightsReport:
     """Analyze saved report history without running any checks."""
     resolved_config = _resolve_insights_config(config, config_dir)
     history_scope = get_history_scope(
@@ -1113,32 +1224,67 @@ def _run_insights(  # noqa: PLR0913
         history_dir,
         history_scope,
     )
-    report = build_insights_report(
+    return build_insights_report(
         payloads[:last],
         reports_available=len(payloads),
         scope=history_scope,
         file_diagnostics=file_diagnostics,
     )
-    text_view = render_text(report)
+
+
+def _run_insights(  # noqa: PLR0913
+    ctx: typer.Context,
+    config: Path,
+    config_dir: Optional[Path],
+    last: int,
+    output_format: InsightsFormat,
+    output_file: Optional[Path],
+    history_dir: Path,
+    instructor: bool,
+    input_file: Optional[Path],
+    save: bool,
+    output_dir: Path,
+) -> None:
+    """Render insights from a saved report or from saved report history."""
+    if save and output_file is not None:
+        _reject_insights_conflict(INSIGHTS_SAVE_FLAG, INSIGHTS_OUTPUT_FLAG)
+    destination = _insights_destination(
+        output_file,
+        save,
+        output_dir,
+        output_format,
+    )
+    if input_file is not None:
+        _reject_insights_input_conflicts(ctx)
+        report = _load_insights_report(input_file)
+    else:
+        report = _build_history_insights(
+            config,
+            config_dir,
+            last,
+            history_dir,
+        )
+    text_view = render_text(report, instructor=instructor)
     selected_view = (
         render_json(report)
         if output_format is InsightsFormat.JSON
         else text_view
     )
-    if output_file is None:
+    if destination is None:
         _echo_insights(selected_view)
         return
     # show the readable summary first so that the confirmation of the
     # written file remains the final line displayed in the terminal
     _echo_insights(text_view)
     _write_insights_file(
-        output_file,
+        destination,
         selected_view.rstrip(NEWLINE) + NEWLINE,
         output_format,
     )
 
 
 def _insights_entry(  # noqa: PLR0913
+    ctx: typer.Context,
     config: Path = typer.Option(
         FILE,
         "--config",
@@ -1157,7 +1303,7 @@ def _insights_entry(  # noqa: PLR0913
     ),
     last: int = typer.Option(
         INSIGHTS_DEFAULT_LAST,
-        "--last",
+        INSIGHTS_LAST_FLAG,
         "-l",
         help="Number of the most recent reports to analyze (>= 1).",
         show_default=True,
@@ -1175,29 +1321,69 @@ def _insights_entry(  # noqa: PLR0913
     ),
     output_file: Optional[Path] = typer.Option(
         None,
-        "--output",
+        INSIGHTS_OUTPUT_FLAG,
         "-o",
         help=(
-            "Write the analysis in the chosen format to this file; the"
-            " terminal still displays the readable text summary."
+            "Write the analysis in the chosen format to this file, creating"
+            " any missing directories; the terminal still displays the"
+            " readable text summary."
         ),
         callback=validate_insights_output,
     ),
+    save: bool = typer.Option(
+        False,
+        INSIGHTS_SAVE_FLAG,
+        "-s",
+        help=(
+            "Save the analysis into the output directory, creating it when"
+            " needed, so that the report sits at a predictable path."
+        ),
+    ),
+    output_dir: Path = typer.Option(
+        INSIGHTS_DEFAULT_OUTPUT_DIR,
+        INSIGHTS_OUTPUT_DIR_FLAG,
+        help="Directory that --save writes the analysis into.",
+        show_default=True,
+        callback=validate_insights_output_dir,
+    ),
     history_dir: Path = typer.Option(
         get_report_history_directory(),
-        "--history-dir",
+        INSIGHTS_HISTORY_DIR_FLAG,
         help="Directory that holds the saved JSON report history.",
         show_default=DEFAULT_REPORT_HISTORY_DIR,
+    ),
+    instructor: bool = typer.Option(
+        False,
+        "--instructor/--no-instructor",
+        help=(
+            "Add the detail that is useful to an instructor, such as check"
+            " identifiers, trend values, and every skipped history file."
+        ),
+    ),
+    input_file: Optional[Path] = typer.Option(
+        None,
+        INSIGHTS_INPUT_FLAG,
+        "-i",
+        help=(
+            "Analyze a previously saved JSON report instead of the report"
+            " history; cannot be combined with --last or --history-dir."
+        ),
+        callback=validate_insights_input,
     ),
 ) -> None:
     """Analyze report history for pass rates, streaks, and check trends."""
     _run_insights(
+        ctx,
         config,
         config_dir,
         last,
         output_format,
         output_file,
         history_dir,
+        instructor,
+        input_file,
+        save,
+        output_dir,
     )
 
 
