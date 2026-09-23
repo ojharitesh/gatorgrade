@@ -199,11 +199,26 @@ The coding agent should write the notes as a Markdown list.
   Don't force it; let it come naturally when the moment feels right.
 - The `insights` command in `gatorgrade/insights.py` renders **plain
   ASCII only**, escaping anything else with `backslashreplace`. This is
-  deliberate: on Windows with a `cp1252` locale, any non-ASCII character
-  makes redirected output die with `UnicodeEncodeError`. That bug is
-  pre-existing and tool-wide (every `Rule` and the crocodile emoji in
-  `--help` hit it) and is tracked separately. Do not introduce rich
-  tables, panels, or rules into insights output until it is fixed.
+  deliberate. GatorGrade never sets the encoding of its own output
+  streams, so when `sys.stdout.encoding` is not UTF-8, which is the case
+  in Git Bash on Windows where it is `cp1252`, any non-ASCII character
+  makes redirected output die with `UnicodeEncodeError`. The bug is
+  pre-existing and tool-wide: a run in which every check passes also
+  crashes, on the check mark, and then exits 1 even though nothing
+  failed. The `Rule` in every error box and the crocodile emoji in
+  `--help` fail the same way. Do not introduce rich tables, panels, or
+  rules into insights output until this is fixed.
+  - Verified fix, not yet applied: call
+    `sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")`
+    on both standard streams at import time in `main.py`, before the
+    shared `Console` is built, so that Typer's own help renderer is
+    covered too.
+  - Unaffected, and not to be confused with the above: an interactive
+    UTF-8 terminal, Linux and macOS, and therefore CI. Mojibake such as
+    `Γ£ô` in PowerShell is a different problem entirely and is not a
+    GatorGrade defect; it happens when `[Console]::OutputEncoding` is
+    `IBM437`, and neither `chcp 65001` nor `PYTHONIOENCODING` changes
+    it.
 - Headings, heading rules, and the struggle-threshold wording in
   `insights.py` are **derived from their constants**, never typed out.
   Hand-typed underlines had already drifted a character short of their
