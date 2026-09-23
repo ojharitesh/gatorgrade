@@ -434,8 +434,8 @@ def test_insights_command_renders_a_text_summary(tmp_path: Path) -> None:
     )
     assert result.exit_code == EXIT_SUCCESS
     assert TITLE_TEXT in _plain(result.stdout)
-    assert NAME_ALPHA in result.stdout
-    assert NAME_BETA in result.stdout
+    assert NAME_ALPHA in _plain(result.stdout)
+    assert NAME_BETA in _plain(result.stdout)
 
 
 def test_analyze_alias_matches_the_insights_command(tmp_path: Path) -> None:
@@ -559,7 +559,7 @@ def test_insights_command_writes_a_file_and_keeps_terminal_output(
     )
     assert result.exit_code == EXIT_SUCCESS
     assert TITLE_TEXT in _plain(result.stdout)
-    assert WROTE_TEXT in result.stdout
+    assert WROTE_TEXT in _plain(result.stdout)
     written = json.loads(destination.read_text(encoding=ENCODING))
     assert written["reports_inspected"] == THREE
 
@@ -577,7 +577,7 @@ def test_insights_command_handles_an_empty_history(tmp_path: Path) -> None:
         str(history_dir),
     )
     assert result.exit_code == EXIT_SUCCESS
-    assert NO_REPORTS_TEXT in result.stdout
+    assert NO_REPORTS_TEXT in _plain(result.stdout)
 
 
 def test_insights_command_handles_a_missing_history_directory(
@@ -593,7 +593,7 @@ def test_insights_command_handles_a_missing_history_directory(
         str(tmp_path / HISTORY_DIR_NAME),
     )
     assert result.exit_code == EXIT_SUCCESS
-    assert NO_REPORTS_TEXT in result.stdout
+    assert NO_REPORTS_TEXT in _plain(result.stdout)
 
 
 def test_insights_command_skips_a_malformed_history_file(
@@ -858,8 +858,8 @@ def test_insights_command_replays_a_saved_report(tmp_path: Path) -> None:
     assert written.exit_code == EXIT_SUCCESS
     replayed = _invoke(INSIGHTS_COMMAND, INPUT_FLAG, str(saved))
     assert replayed.exit_code == EXIT_SUCCESS
-    assert TITLE_TEXT in replayed.stdout
-    assert NAME_ALPHA in replayed.stdout
+    assert TITLE_TEXT in _plain(replayed.stdout)
+    assert NAME_ALPHA in _plain(replayed.stdout)
 
 
 def test_insights_command_replays_a_saved_report_as_json(
@@ -962,7 +962,7 @@ def test_insights_command_accepts_the_instructor_flag(tmp_path: Path) -> None:
         INSTRUCTOR_FLAG,
     )
     assert result.exit_code == EXIT_SUCCESS
-    assert TITLE_TEXT in result.stdout
+    assert TITLE_TEXT in _plain(result.stdout)
 
 
 def test_insights_command_runs_no_checks_or_configuration_parsing(
