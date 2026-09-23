@@ -387,7 +387,7 @@ checks are consistently difficult, which are improving, and which are already
 mastered. The `analyze` command is an alias that behaves identically.
 
 ```bash
-gatorgrade insights --config gatorgrade.yml
+gatorgrade insights
 ```
 
 This command only reads saved history. It never runs setup commands, executes
@@ -398,97 +398,125 @@ to `gatorgrade` itself rather than to `insights`, so `gatorgrade --config
 custom.yml insights` analyzes the default `gatorgrade.yml` instead of
 `custom.yml`. Write `gatorgrade insights --config custom.yml` instead.
 
-The command accepts the following options:
+#### Insights Options
 
 - `--config`, `-c`: The configuration file that identifies which project's
   history to analyze. The default is `gatorgrade.yml`. The file must exist,
-  because its resolved path and optional project name determine the project
-  scope.
+  because its resolved path and optional project name determine the scope.
 - `--config-dir`, `-d`: The directory to search for the configuration file,
   using the same search order as a normal GatorGrade run.
 - `--last`, `-l`: The number of most recent reports to analyze. The default is
   5. The value must be a positive integer.
 - `--format`, `-f`: Either `text` for a readable summary or `json` for
   machine-readable results. The default is `text`.
-- `--output`, `-o`: Write the analysis in the chosen format to a file. The
-  terminal still displays the readable text summary, so the command stays
-  useful when its output is redirected.
+- `--save`, `-s`: Write the analysis into the output directory, creating it
+  when needed, as `insights.json` or `insights.txt` to match the format.
+- `--output-dir`: The directory that `--save` writes into. The default is
+  `insights`.
+- `--output`, `-o`: Write the analysis to an exact path, creating any missing
+  parent directories.
+- `--input`, `-i`: Render a previously saved JSON report instead of reading
+  history. Cannot be combined with `--last` or `--history-dir`.
+- `--instructor`: Add detail useful to an instructor rather than a student.
 - `--history-dir`: The directory holding the saved JSON report history. The
   default is the platform-specific user data directory.
 
 #### Text Output
 
 ```bash
-gatorgrade insights --config gatorgrade.yml --last 3
+gatorgrade insights --last 10
 ```
+
+<!-- rumdl-disable MD013 -->
 
 ```text
-GatorGrade Insights
-Scope: f071015a5413db37fbd4abfba9560341d7a80c1648e6365f8b72328af9ca1967
-Reports inspected: 3 of 3 available
+--------------------------------- GatorGrade Insights ---------------------------------
+                          Reports inspected: 4 of 4 available
 
-Checks (3):
-- Use an if statement
-  id: ifstmt
-  observations: 3  passes: 3  pass rate: 100.00%
-  latest: pass  current streak: 3 passing
-  trend: insufficient-data
-- Run the tests
-  id: tests
-  observations: 2  passes: 1  pass rate: 50.00%
-  latest: pass  current streak: 1 passing
-  trend: insufficient-data
-- Complete all TODOs
-  id: todos
-  observations: 3  passes: 1  pass rate: 33.33%
-  latest: pass  current streak: 1 passing
-  trend: insufficient-data
+FOCUS ON THESE (passing under 85%)
+----------------------------------
++------+--------+----------------------+--------------------------------------------------+
+| RATE | PASSED | RECENT               | CHECK                                            |
++------+--------+----------------------+--------------------------------------------------+
+| 25%  | 1/4    | improving            | Complete all TODOs                               |
++------+--------+----------------------+--------------------------------------------------+
+| 33%  | 1/3    | latest pass          | Run the tests                                    |
++------+--------+----------------------+--------------------------------------------------+
 
-Best check: Use an if statement
-Worst check: Complete all TODOs
-
-Diagnostics (1):
-- file gatorgrade-report-20260904T000000.000000Z-bad.json: history file
-  skipped by the loader (invalid_json)
+ALL CHECKS (worst first)
+------------------------
++------+--------+--------+------------+--------------+--------------------------------------------------+
+| RATE | PASSED | LATEST | STREAK     | TREND        | CHECK                                            |
++------+--------+--------+------------+--------------+--------------------------------------------------+
+| 25%  | 1/4    | pass   | 1 passing  | improving    | Complete all TODOs                               |
++------+--------+--------+------------+--------------+--------------------------------------------------+
+| 33%  | 1/3    | pass   | 1 passing  | insufficient | Run the tests                                    |
++------+--------+--------+------------+--------------+--------------------------------------------------+
 ```
+
+<!-- rumdl-enable MD013 -->
+
+Checks are ordered worst first so the ones worth attention lead, and the focus
+section repeats only those passing under 85%. Output is plain ASCII, with any
+other character escaped, so redirecting it to a file is always safe. Adding
+`--instructor` also shows the scope, a truncated check identifier, the numeric
+trend delta, and every skipped history file instead of a count.
 
 #### Machine-Readable Output
 
 ```bash
-gatorgrade analyze --config gatorgrade.yml --format json --output insights.json
+gatorgrade insights --format json
 ```
 
 The JSON payload contains `scope`, `reports_inspected`, `reports_available`,
 `best_check`, `worst_check`, a `diagnostics` list, and a `checks` list. Each
 entry in `checks` records `identifier`, `name`, `observations`, `passes`,
 `pass_rate`, `latest_status`, `current_pass_streak`, `current_fail_streak`,
-`trend`, `trend_delta`, and the full `status_history`.
+`trend`, `trend_delta`, and the full `status_history`. The best and worst
+checks appear only in this payload, because the text view shows the focus
+section instead.
 
-```json
-{
-  "scope": "f071015a5413db37fbd4abfba9560341d7a80c1648e6365f8b72328af9ca1967",
-  "reports_inspected": 3,
-  "reports_available": 3,
-  "checks": [
-    {
-      "identifier": "ifstmt",
-      "name": "Use an if statement",
-      "observations": 3,
-      "passes": 3,
-      "pass_rate": 1.0,
-      "latest_status": true,
-      "current_pass_streak": 3,
-      "current_fail_streak": 0,
-      "trend": "insufficient-data",
-      "trend_delta": null,
-      "status_history": [true, true, true]
-    }
-  ],
-  "best_check": "ifstmt",
-  "worst_check": "todos",
-  "diagnostics": []
-}
+JSON output is never styled or wrapped, so it stays valid when redirected.
+
+#### Saving and Replaying a Report
+
+Save the analysis to a predictable path, creating the directory when needed:
+
+```bash
+gatorgrade insights --format json --save
 ```
+
+Render that saved report again later, without reading history:
+
+```bash
+gatorgrade insights --input insights/insights.json
+```
+
+Replaying produces exactly the same output as the run that created the file,
+and honours `--format` and `--instructor` in the same way.
+
+#### Requiring a Committed Report
+
+Because `--input` exits non-zero when a report is missing or malformed, an
+assignment can require a student to generate and commit one:
+
+```yaml
+- insights/insights.json:
+  - description: The insights report has been generated and committed
+    check: ConfirmFileExists
+- description: The committed insights report is structurally valid
+  check: ShellCommand
+  command: gatorgrade insights --input insights/insights.json
+```
+
+Two checks rather than one, so that a missing report and a corrupt report fail
+differently. The student workflow is `gatorgrade insights --format json
+--save`, followed by committing the `insights` directory.
+
+These checks prove the file exists and is structurally valid. They cannot
+prove it is current, because a grading machine has no copy of the student's
+history, and they cannot prove it belongs to that student, because the scope
+hashes an absolute configuration path that differs between machines.
 
 #### How the Statistics Are Calculated
 
@@ -511,7 +539,7 @@ history always produces the same output.
   reported as `improving` or `declining`, and anything smaller is `stable`.
   Fewer than 4 observations reports `insufficient-data`.
 - **Best and worst checks** consider only checks with at least 2 observations,
-  and are `none` when no check qualifies. Ties are broken by more observations,
+  and are `null` when no check qualifies. Ties are broken by more observations,
   then by the longer relevant streak, then by identifier in ascending order.
   Weighted scores are not used.
 - **Diagnostics** explain every file, report, or check entry that was skipped.
