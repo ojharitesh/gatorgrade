@@ -62,10 +62,6 @@ DUPLICATE_CHECK_DETAIL = (
 # text rendering pieces
 JSON_INDENT = 2
 NEWLINE = "\n"
-TEXT_TITLE = (
-    "--------------------------------- GatorGrade Insights "
-    "---------------------------------"
-)
 TEXT_SCOPE = "Scope: {}"
 TEXT_REPORTS = "Reports inspected: {} of {} available"
 TEXT_NO_REPORTS = "No valid history reports were found for this project."
@@ -88,11 +84,23 @@ TABLE_CELL_SEPARATOR = " | "
 TABLE_ROW_START = "| "
 TABLE_ROW_END = " |"
 IDENTIFIER_WIDTH = 12
-TEXT_FOCUS_HEADER = "FOCUS ON THESE (passing under 85%)"
-TEXT_FOCUS_UNDERLINE = "---------------------------------"
-TEXT_NO_FOCUS = "Nothing to focus on: all checks are passing at least 85%."
+# every heading rule and the threshold wording are derived rather than
+# typed out, so that a reworded heading cannot drift out of alignment and
+# a changed threshold cannot leave the text claiming the old percentage
+TITLE_WORDS = "GatorGrade Insights"
+TITLE_RULE_WIDTH = 33
+TEXT_TITLE = (
+    f"{TABLE_HORIZONTAL * TITLE_RULE_WIDTH} {TITLE_WORDS} "
+    f"{TABLE_HORIZONTAL * TITLE_RULE_WIDTH}"
+)
+STRUGGLE_PERCENT = f"{STRUGGLE_THRESHOLD:.0%}"
+TEXT_FOCUS_HEADER = f"FOCUS ON THESE (passing under {STRUGGLE_PERCENT})"
+TEXT_FOCUS_UNDERLINE = TABLE_HORIZONTAL * len(TEXT_FOCUS_HEADER)
+TEXT_NO_FOCUS = (
+    f"Nothing to focus on: all checks are passing at least {STRUGGLE_PERCENT}."
+)
 TEXT_ALL_HEADER = "ALL CHECKS (worst first)"
-TEXT_ALL_UNDERLINE = "-----------------------"
+TEXT_ALL_UNDERLINE = TABLE_HORIZONTAL * len(TEXT_ALL_HEADER)
 TEXT_COLUMNS = ("RATE", "PASSED", "LATEST", "STREAK", "TREND")
 TEXT_DETAIL_COLUMNS = ("ID", "DELTA")
 TEXT_NAME_COLUMN = "CHECK"
