@@ -197,3 +197,22 @@ The coding agent should write the notes as a Markdown list.
   in a bit of flair like a pun, a limerick, a dad joke, a haiku about
   test cases, or anything else that might make the developer smile.
   Don't force it; let it come naturally when the moment feels right.
+- The `insights` command in `gatorgrade/insights.py` renders **plain
+  ASCII only**, escaping anything else with `backslashreplace`. This is
+  deliberate: on Windows with a `cp1252` locale, any non-ASCII character
+  makes redirected output die with `UnicodeEncodeError`. That bug is
+  pre-existing and tool-wide (every `Rule` and the crocodile emoji in
+  `--help` hit it) and is tracked separately. Do not introduce rich
+  tables, panels, or rules into insights output until it is fixed.
+- Headings, heading rules, and the struggle-threshold wording in
+  `insights.py` are **derived from their constants**, never typed out.
+  Hand-typed underlines had already drifted a character short of their
+  headings, and `85%` had been duplicated away from
+  `STRUGGLE_THRESHOLD`.
+- A project's history scope is a hash of the **resolved absolute**
+  config path, so a scope can never be matched across two machines.
+  Any feature that tries to verify a committed report is authentic, or
+  current, on a grading machine cannot work.
+- `tests/test_insights_cli.py` builds a `TextIOWrapper` with
+  `newline=""`. Without it, `\n` becomes `\r\n` on Windows and the
+  byte-comparison tests pass in CI while failing locally.

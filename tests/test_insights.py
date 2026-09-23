@@ -9,6 +9,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from gatorgrade.insights import (
+    CHECK_NAME_WIDTH,
     DIAGNOSTIC_KIND_CHECK,
     DIAGNOSTIC_KIND_FILE,
     DIAGNOSTIC_KIND_REPORT,
@@ -21,11 +22,12 @@ from gatorgrade.insights import (
     INSIGHTS_MISSING_IDENTITY,
     INSIGHTS_SKIP_CHECK_ENTRY,
     NAME_WITH_PATH,
+    NEWLINE,
     REPORT_SOURCE_PREFIX,
     TEXT_NO_CHECKS,
-    TEXT_NO_RANKING,
+    TEXT_NO_FOCUS,
     TEXT_NO_REPORTS,
-    TEXT_OTHER_SCOPE,
+    TEXT_SKIPPED,
     TEXT_TITLE,
     TREND_DECLINING,
     TREND_IMPROVING,
@@ -38,7 +40,6 @@ from gatorgrade.insights import (
     _best_sort_key,
     _check_identifier,
     _check_name,
-    _check_name_for,
     _compute_trend,
     _current_streaks,
     _display_name,
@@ -50,6 +51,9 @@ from gatorgrade.insights import (
     _rankable_checks,
     _render_check,
     _render_diagnostics,
+    _render_focus,
+    _render_row,
+    _render_table,
     _report_source,
     _select_best_check,
     _select_worst_check,
@@ -59,6 +63,8 @@ from gatorgrade.insights import (
     build_insights_report,
     render_json,
     render_text,
+    sort_checks_by_struggle,
+    struggling_checks,
 )
 
 SCOPE = "project-scope"
@@ -95,6 +101,24 @@ DECLINING_DELTA = -1.0
 STABLE_DELTA = 0.05
 ZERO_DELTA = 0.0
 NEGATIVE_ONE = -1
+THRESHOLD = 0.85
+BELOW_THRESHOLD = 0.849
+LONG_NAME = "Complete every required exercise " * THREE
+UNICODE_NAME = "Review caf\u00e9 notes"
+LONG_IDENTIFIER = "a" * 64
+IDENTIFIER_PREFIX = "a" * 12
+DELTA_TEXT = "+0.0000"
+PASS_STREAK_TEXT = "2 passing"
+FAIL_STREAK_TEXT = "2 failing"
+INSUFFICIENT_TEXT = "insufficient"
+CHECK_WARNING_TEXT = "Report/check diagnostics: 1"
+TABLE_PIPE = "|"
+LAST_CELL_INDEX = -2
+TEXT_SPACE = " "
+EMPTY_TEXT = ""
+ASCII_ENCODING = "ascii"
+ASCII_ERRORS = "backslashreplace"
+LONG_TOKEN = "x" * (CHECK_NAME_WIDTH * THREE)
 
 
 def _check(
@@ -651,24 +675,17 @@ def test_render_check_describes_pass_and_fail_streaks() -> None:
     failing = _summary(CHECK_B, NONE_RATE, observations=TWO, fail_streak=TWO)
     passing_lines = _render_check(passing)
     failing_lines = _render_check(failing)
-    assert len(passing_lines) == FIVE
-    assert CHECK_A in passing_lines[1]
-    assert passing_lines[3] != failing_lines[3]
-    assert TREND_INSUFFICIENT_DATA in passing_lines[4]
+    assert CHECK_A in passing_lines
+    assert passing_lines != failing_lines
+    assert PASS_STREAK_TEXT in passing_lines
+    assert FAIL_STREAK_TEXT in failing_lines
+    assert INSUFFICIENT_TEXT in passing_lines
     with_delta = passing.model_copy(
         update={"trend": TREND_STABLE, "trend_delta": ZERO_DELTA}
     )
-    assert TREND_STABLE in _render_check(with_delta)[4]
-
-
-def test_check_name_for_resolves_identifier_to_display_name() -> None:
-    """Ranked identifiers render as names, with fallbacks otherwise."""
-    report = _build([[_check(CHECK_A, True, NAME_A)]])
-    assert _check_name_for(report, CHECK_A) == NAME_A
-    assert _check_name_for(report, CHECK_B) == CHECK_B
-    assert _check_name_for(report, None) == TEXT_NO_RANKING.format(
-        INSIGHTS_MIN_RANK_OBS
-    )
+    assert TREND_STABLE in _render_check(with_delta)
+    assert DELTA_TEXT in _render_check(with_delta, instructor=True)
+    assert DELTA_TEXT not in _render_check(with_delta)
 
 
 def test_render_diagnostics_keeps_other_scopes_quiet() -> None:
@@ -683,20 +700,29 @@ def test_render_diagnostics_keeps_other_scopes_quiet() -> None:
         ],
     )
     lines = _render_diagnostics(report)
-    assert lines[0] == TEXT_OTHER_SCOPE.format(ONE)
-    assert len(lines) == THREE
-    assert FILE_REASON in lines[2]
-    assert HISTORY_SKIP_DIFFERENT_SCOPE not in lines[2]
+    assert lines == [TEXT_SKIPPED.format(TWO, ONE, ONE)]
+    detailed = _render_diagnostics(report, instructor=True)
+    assert len(detailed) == THREE
+    assert FILE_REASON in detailed[TWO]
+    assert HISTORY_SKIP_DIFFERENT_SCOPE in detailed[ONE]
     assert _render_diagnostics(_build([])) == []
 
 
 def test_render_text_reports_empty_history() -> None:
     """An empty history renders a clear message and no check section."""
     text = render_text(_build([]))
-    assert text.startswith(TEXT_TITLE)
-    assert SCOPE in text
+    assert text.startswith(NEWLINE + TEXT_TITLE + NEWLINE)
+    assert SCOPE not in text
     assert TEXT_NO_REPORTS in text
     assert TEXT_NO_CHECKS not in text
+
+
+def test_render_diagnostics_counts_check_warnings_without_skipped_files() -> (
+    None
+):
+    """Check warnings are not mislabeled as skipped history files."""
+    report = _build([[_check(CHECK_A, INVALID_STATUS, NAME_A)]])
+    assert _render_diagnostics(report) == [CHECK_WARNING_TEXT]
 
 
 def test_render_text_reports_history_without_checks() -> None:
@@ -709,7 +735,9 @@ def test_render_text_reports_history_without_checks() -> None:
 def test_render_text_accepts_the_instructor_parameter() -> None:
     """The instructor parameter is accepted by the rendering contract."""
     report = _build([[_check(CHECK_A, True, NAME_A)]])
-    assert render_text(report, instructor=True).startswith(TEXT_TITLE)
+    assert render_text(report, instructor=True).startswith(
+        NEWLINE + TEXT_TITLE + NEWLINE
+    )
 
 
 def test_render_text_lists_checks_ranking_and_diagnostics() -> None:
@@ -725,18 +753,18 @@ def test_render_text_lists_checks_ranking_and_diagnostics() -> None:
     assert text.endswith("\n")
     assert NAME_A in text
     assert NAME_B in text
-    assert CHECK_A in text
-    assert f"Best check: {NAME_A}" in text
-    assert f"Worst check: {NAME_B}" in text
-    assert TEXT_OTHER_SCOPE.format(ONE) in text
-    assert INSIGHTS_INVALID_STATUS in text
+    assert CHECK_A not in text
+    assert text.index(NAME_B) < text.index(NAME_A)
+    assert TEXT_SKIPPED.format(ONE, ONE, ZERO) in text
+    assert INSIGHTS_INVALID_STATUS not in text
+    assert INSIGHTS_INVALID_STATUS in render_text(report, instructor=True)
     assert FILE_NAME not in text
 
 
-def test_render_text_shows_no_ranking_for_single_report() -> None:
-    """A single report cannot rank checks and says why."""
+def test_render_text_shows_no_focus_for_healthy_checks() -> None:
+    """Healthy checks get an explicit message instead of an empty section."""
     text = render_text(_build([[_check(CHECK_A, True, NAME_A)]]))
-    assert TEXT_NO_RANKING.format(INSIGHTS_MIN_RANK_OBS) in text
+    assert TEXT_NO_FOCUS in text
 
 
 def test_render_json_round_trips_through_the_model() -> None:
@@ -752,6 +780,130 @@ def test_render_json_round_trips_through_the_model() -> None:
     assert decoded["scope"] == SCOPE
     assert decoded["checks"][0]["trend_delta"] is None
     assert InsightsReport.model_validate_json(rendered) == report
+
+
+def test_sort_checks_by_struggle_preserves_input_and_breaks_ties() -> None:
+    """Display sorting applies every tie breaker, including single runs."""
+    checks = [
+        _summary(CHECK_C, FULL),
+        _summary(CHECK_C, HALF, observations=ONE),
+        _summary(CHECK_C, HALF, observations=THREE),
+        _summary(CHECK_B, HALF, observations=THREE, fail_streak=TWO),
+        _summary(CHECK_A, HALF, observations=THREE, fail_streak=TWO),
+    ]
+    original = list(checks)
+    assert sort_checks_by_struggle(checks) == list(reversed(checks))
+    assert checks == original
+    assert sort_checks_by_struggle([]) == []
+
+
+def test_struggling_checks_excludes_exact_threshold() -> None:
+    """Only rates strictly under 85 percent need focus."""
+    below = _summary(CHECK_A, BELOW_THRESHOLD)
+    boundary = _summary(CHECK_B, THRESHOLD)
+    assert struggling_checks([boundary, below]) == [below]
+    assert struggling_checks([]) == []
+
+
+def test_render_text_instructor_details_and_json_are_independent() -> None:
+    """Instructor details do not leak into student text or mutate JSON."""
+    report = _build([[_check(LONG_IDENTIFIER, True, NAME_A)]])
+    report.checks[ZERO].trend_delta = ZERO_DELTA
+    before = render_json(report)
+    student = render_text(report)
+    instructor = render_text(report, instructor=True)
+    for detail in (SCOPE, IDENTIFIER_PREFIX, DELTA_TEXT):
+        assert detail not in student
+        assert detail in instructor
+    assert LONG_IDENTIFIER not in instructor
+    assert render_json(report) == before
+
+
+def test_render_check_aligns_long_names_and_double_digit_counts() -> None:
+    """Names remain complete after aligned numeric columns."""
+    short = _summary(CHECK_A, FULL, pass_streak=ONE)
+    long = _summary(
+        LONG_NAME,
+        FULL,
+        observations=STABLE_HALF_SIZE,
+        pass_streak=STABLE_HALF_SIZE,
+    )
+    for instructor in (False, True):
+        short_row = _render_check(short, instructor=instructor)
+        long_row = _render_check(long, instructor=instructor)
+        rows = long_row.splitlines()
+        assert all(len(row) == len(short_row) for row in rows)
+        name_parts = [
+            row.split(TABLE_PIPE)[LAST_CELL_INDEX].strip() for row in rows
+        ]
+        assert TEXT_SPACE.join(name_parts) == LONG_NAME.strip()
+
+
+def test_render_text_escapes_non_ascii_names() -> None:
+    """Both text views remain safe for redirected Windows streams."""
+    report = _build([[_check(CHECK_A, False, UNICODE_NAME)]])
+    for instructor in (False, True):
+        assert render_text(report, instructor=instructor).isascii()
+
+
+@pytest.mark.parametrize("name", [EMPTY_TEXT, UNICODE_NAME, LONG_TOKEN])
+def test_render_row_wraps_empty_unicode_and_unbroken_names(name: str) -> None:
+    """All cells stay ASCII and names survive wrapping without truncation."""
+    text = _render_row([], name)
+    rows = text.splitlines()
+    assert text.isascii()
+    assert len({len(row) for row in rows}) == ONE
+    recovered = EMPTY_TEXT.join(
+        row.split(TABLE_PIPE)[LAST_CELL_INDEX].strip() for row in rows
+    )
+    assert recovered == name.encode(
+        ASCII_ENCODING, errors=ASCII_ERRORS
+    ).decode(ASCII_ENCODING)
+
+
+def test_render_table_aligns_borders_with_wrapped_rows() -> None:
+    """Header, borders, and wrapped data have the same width."""
+    columns = (CHECK_A,)
+    row = _render_row(list(columns), LONG_NAME)
+    table = _render_table(columns, [row])
+    physical_lines = NEWLINE.join(table).splitlines()
+    assert len({len(line) for line in physical_lines}) == ONE
+    assert table[ZERO] == table[TWO] == table[NEGATIVE_ONE]
+    assert len(_render_table(columns, [])) == THREE
+
+
+def test_render_focus_wraps_names_with_aligned_recent_details() -> None:
+    """Focus rows keep a double-digit failing streak beside wrapped names."""
+    summary = _summary(
+        LONG_NAME,
+        NONE_RATE,
+        fail_streak=STABLE_HALF_SIZE,
+    )
+    rows = _render_focus(summary).splitlines()
+    assert len({len(row) for row in rows}) == ONE
+    assert (
+        TEXT_SPACE.join(
+            row.split(TABLE_PIPE)[LAST_CELL_INDEX].strip() for row in rows
+        )
+        == LONG_NAME.strip()
+    )
+
+
+def test_render_text_focus_describes_improvement() -> None:
+    """An improving check has an actionable trend in the focus section."""
+    report = _build(
+        [
+            [_check(CHECK_A, False, NAME_A)],
+            [_check(CHECK_A, False, NAME_A)],
+            [_check(CHECK_A, True, NAME_A)],
+            [_check(CHECK_A, True, NAME_A)],
+        ]
+    )
+    focus_row = next(
+        line for line in render_text(report).splitlines() if NAME_A in line
+    )
+    assert TREND_IMPROVING in focus_row
+    assert focus_row.split(TABLE_PIPE)[LAST_CELL_INDEX].strip() == NAME_A
 
 
 def test_render_outputs_are_byte_identical_for_equal_inputs() -> None:

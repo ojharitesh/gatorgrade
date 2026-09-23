@@ -3,27 +3,37 @@
 import datetime
 import json
 import re
+from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 import typer
 from click import BadParameter
+from rich.console import Console
 from typer.testing import CliRunner
 
 from gatorgrade import main
 from gatorgrade.insights import InsightsReport
 from gatorgrade.main import (
     InsightsFormat,
+    _build_history_insights,
+    _insights_destination,
+    _load_insights_report,
     _resolve_insights_config,
-    _run_insights,
     _write_insights_file,
     app,
 )
-from gatorgrade.report_history import get_history_scope, save_report_history
+from gatorgrade.report_history import (
+    HISTORY_REPORT_KEY,
+    get_history_scope,
+    save_report_history,
+)
 from gatorgrade.validate import (
+    validate_insights_input,
     validate_insights_last,
     validate_insights_output,
+    validate_insights_output_dir,
 )
 
 runner = CliRunner()
@@ -45,7 +55,32 @@ LAST_FLAG = "--last"
 FORMAT_FLAG = "--format"
 OUTPUT_FLAG = "--output"
 HELP_FLAG = "--help"
+INPUT_FLAG = "--input"
+INSTRUCTOR_FLAG = "--instructor"
+SAVE_FLAG = "--save"
+OUTPUT_DIR_FLAG = "--output-dir"
+SAVE_DIR_NAME = "insights"
+NESTED_DIR_NAME = "nested"
+SAVED_JSON_NAME = "insights.json"
+SAVED_TEXT_NAME = "insights.txt"
 ALIAS_HELP_TEXT = "Alias for the insights command."
+
+SAVED_REPORT_NAME = "saved.json"
+UNPARSABLE_JSON = "{broken"
+NOT_AN_OBJECT_JSON = "[]"
+MISSING_FIELD_JSON = '{"scope": "only-a-scope"}'
+WRONG_TYPE_JSON = (
+    '{"scope": 1, "reports_inspected": "many", "reports_available": 0,'
+    ' "checks": [], "best_check": null, "worst_check": null,'
+    ' "diagnostics": []}'
+)
+BAD_CHECK_ENTRY_JSON = (
+    '{"scope": "s", "reports_inspected": 1, "reports_available": 1,'
+    ' "checks": [{"identifier": "a"}], "best_check": null,'
+    ' "worst_check": null, "diagnostics": []}'
+)
+NOT_A_REPORT_TEXT = "not a valid insights report"
+CANNOT_COMBINE_TEXT = "cannot be combined"
 
 CHECK_ALPHA = "check-alpha"
 CHECK_BETA = "check-beta"
@@ -61,7 +96,6 @@ HISTORY_MONTH = 9
 MALFORMED_FILE_NAME = "gatorgrade-report-20260930T000000.000000Z-bad.json"
 MALFORMED_CONTENTS = "{not valid json"
 
-ZERO = 0
 ONE = 1
 TWO = 2
 THREE = 3
@@ -76,7 +110,6 @@ WROTE_TEXT = "Wrote"
 MISSING_CONFIG_TEXT = "does not exist"
 POSITIVE_INTEGER_TEXT = "must be a positive integer"
 IS_DIRECTORY_TEXT = "is a directory"
-NO_DIRECTORY_TEXT = "does not exist"
 BOOM_MESSAGE = "insights must never run this"
 
 
@@ -84,11 +117,116 @@ ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 BORDER_PATTERN = re.compile("[─-╿|]")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 SPACE = " "
+EMPTY_TEXT = ""
+WINDOWS_ENCODING = "cp1252"
+# an empty newline setting stops the wrapper from translating a line feed
+# into the platform line ending, which would otherwise make this
+# comparison pass on Linux and fail on Windows
+UNTRANSLATED_NEWLINE = ""
+NARROW_TERMINAL_WIDTH = 40
+COLOR_SYSTEM: Literal["standard"] = "standard"
+CONSOLE_ATTRIBUTE = "console"
+MARKUP_NAME = "[bold]Review caf\u00e9 notes[/bold] :smile:"
+GREEN_TITLE = "\x1b[1;32mGatorGrade"
+YELLOW_TITLE = "\x1b[1;33mInsights"
+GREEN_PASS = "\x1b[1;32mpass"
+RED_FAIL = "\x1b[1;31mfail"
+
+
+def _display_report() -> InsightsReport:
+    """Create a report with pass, fail, Unicode, and markup-like text."""
+    return main.build_insights_report(
+        [
+            {
+                HISTORY_REPORT_KEY: {
+                    CHECKS_KEY: [
+                        _check(CHECK_ALPHA, False, MARKUP_NAME),
+                        _check(CHECK_BETA, True, NAME_BETA),
+                    ]
+                }
+            }
+        ],
+        reports_available=ONE,
+        scope=PROJECT_NAME,
+        file_diagnostics=[],
+    )
+
+
+@pytest.mark.parametrize("instructor", [False, True])
+def test_echo_insights_redirects_tables_to_cp1252_without_styling(
+    monkeypatch: pytest.MonkeyPatch,
+    instructor: bool,
+) -> None:
+    """Narrow redirected Windows streams preserve the exact ASCII report."""
+    payload = main.render_text(_display_report(), instructor=instructor)
+    buffer = BytesIO()
+    with TextIOWrapper(
+        buffer,
+        encoding=WINDOWS_ENCODING,
+        newline=UNTRANSLATED_NEWLINE,
+    ) as stream:
+        monkeypatch.setattr(
+            main,
+            CONSOLE_ATTRIBUTE,
+            Console(
+                file=stream,
+                force_terminal=False,
+                width=NARROW_TERMINAL_WIDTH,
+            ),
+        )
+        main._echo_insights(payload)
+        stream.flush()
+        assert buffer.getvalue() == payload.encode(WINDOWS_ENCODING)
+
+
+def test_echo_insights_colors_tables_without_changing_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal styling colors titles and statuses without interpreting names."""
+    payload = main.render_text(_display_report())
+    stream = StringIO()
+    monkeypatch.setattr(
+        main,
+        CONSOLE_ATTRIBUTE,
+        Console(
+            file=stream,
+            force_terminal=True,
+            no_color=False,
+            color_system=COLOR_SYSTEM,
+            width=NARROW_TERMINAL_WIDTH,
+        ),
+    )
+    main._echo_insights(payload)
+    output = stream.getvalue()
+    assert ANSI_PATTERN.sub(EMPTY_TEXT, output) == payload
+    for colored_text in (GREEN_TITLE, YELLOW_TITLE, GREEN_PASS, RED_FAIL):
+        assert colored_text in output
+
+
+def test_echo_insights_keeps_json_raw_in_color_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Color support never adds ANSI codes or wrapping to JSON."""
+    payload = main.render_json(_display_report())
+    stream = StringIO()
+    monkeypatch.setattr(
+        main,
+        CONSOLE_ATTRIBUTE,
+        Console(
+            file=stream,
+            force_terminal=True,
+            no_color=False,
+            color_system=COLOR_SYSTEM,
+            width=NARROW_TERMINAL_WIDTH,
+        ),
+    )
+    main._echo_insights(payload)
+    assert stream.getvalue().rstrip() == payload
 
 
 def _plain(text: str) -> str:
     """Return CLI output without styling, borders, or wrapped line breaks."""
-    without_styling = ANSI_PATTERN.sub(SPACE, text)
+    without_styling = ANSI_PATTERN.sub(EMPTY_TEXT, text)
     without_borders = BORDER_PATTERN.sub(SPACE, without_styling)
     return WHITESPACE_PATTERN.sub(SPACE, without_borders)
 
@@ -190,12 +328,64 @@ def test_validate_insights_output_rejects_a_directory(tmp_path: Path) -> None:
         validate_insights_output(tmp_path)
 
 
-def test_validate_insights_output_rejects_a_missing_parent(
+def test_validate_insights_output_allows_a_missing_parent(
     tmp_path: Path,
 ) -> None:
-    """A path inside a missing directory raises BadParameter."""
+    """A path inside a missing directory is allowed and created on write."""
+    destination = tmp_path / HISTORY_DIR_NAME / OUTPUT_NAME
+    assert validate_insights_output(destination) == destination
+
+
+def test_validate_insights_output_dir_allows_new_and_existing_directories(
+    tmp_path: Path,
+) -> None:
+    """A directory that exists or does not exist yet is both acceptable."""
+    assert validate_insights_output_dir(tmp_path) == tmp_path
+    fresh = tmp_path / SAVE_DIR_NAME
+    assert validate_insights_output_dir(fresh) == fresh
+
+
+def test_validate_insights_output_dir_rejects_an_existing_file(
+    tmp_path: Path,
+) -> None:
+    """A path that already names a file cannot hold saved reports."""
+    occupied = tmp_path / OUTPUT_NAME
+    occupied.write_text(NOT_AN_OBJECT_JSON, encoding=ENCODING)
     with pytest.raises(BadParameter):
-        validate_insights_output(tmp_path / HISTORY_DIR_NAME / OUTPUT_NAME)
+        validate_insights_output_dir(occupied)
+
+
+def test_insights_destination_prefers_an_explicit_output_path(
+    tmp_path: Path,
+) -> None:
+    """An explicit output path is used ahead of the save directory."""
+    explicit = tmp_path / OUTPUT_NAME
+    assert (
+        _insights_destination(explicit, True, tmp_path, InsightsFormat.JSON)
+        == explicit
+    )
+
+
+def test_insights_destination_names_the_file_for_the_format(
+    tmp_path: Path,
+) -> None:
+    """Saving chooses a filename that matches the chosen output format."""
+    assert (
+        _insights_destination(None, True, tmp_path, InsightsFormat.JSON)
+        == tmp_path / SAVED_JSON_NAME
+    )
+    assert (
+        _insights_destination(None, True, tmp_path, InsightsFormat.TEXT)
+        == tmp_path / SAVED_TEXT_NAME
+    )
+
+
+def test_insights_destination_is_none_without_saving(tmp_path: Path) -> None:
+    """Displaying the analysis alone writes no file at all."""
+    assert (
+        _insights_destination(None, False, tmp_path, InsightsFormat.TEXT)
+        is None
+    )
 
 
 def test_resolve_insights_config_returns_an_existing_file(
@@ -222,20 +412,14 @@ def test_write_insights_file_reports_an_unwritable_destination(
         _write_insights_file(tmp_path, TITLE_TEXT, InsightsFormat.TEXT)
 
 
-def test_run_insights_writes_the_selected_format(tmp_path: Path) -> None:
-    """The helper writes JSON to the file when JSON output is selected."""
+def test_build_history_insights_analyzes_the_saved_history(
+    tmp_path: Path,
+) -> None:
+    """The history helper aggregates the saved reports for this project."""
     config_path, history_dir = _project(tmp_path)
-    destination = tmp_path / OUTPUT_NAME
-    _run_insights(
-        config_path,
-        None,
-        THREE,
-        InsightsFormat.JSON,
-        destination,
-        history_dir,
-    )
-    decoded = json.loads(destination.read_text(encoding=ENCODING))
-    assert decoded["reports_inspected"] == THREE
+    report = _build_history_insights(config_path, None, THREE, history_dir)
+    assert report.reports_inspected == THREE
+    assert report.reports_available == THREE
 
 
 def test_insights_command_renders_a_text_summary(tmp_path: Path) -> None:
@@ -249,7 +433,7 @@ def test_insights_command_renders_a_text_summary(tmp_path: Path) -> None:
         str(history_dir),
     )
     assert result.exit_code == EXIT_SUCCESS
-    assert TITLE_TEXT in result.stdout
+    assert TITLE_TEXT in _plain(result.stdout)
     assert NAME_ALPHA in result.stdout
     assert NAME_BETA in result.stdout
 
@@ -348,10 +532,18 @@ def test_insights_command_limits_the_inspected_reports(
     assert report.reports_available == THREE
 
 
+@pytest.mark.parametrize("enable_color", [False, True])
 def test_insights_command_writes_a_file_and_keeps_terminal_output(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enable_color: bool,
 ) -> None:
     """Writing a file still prints the summary and a confirmation line."""
+    monkeypatch.setattr(
+        main,
+        CONSOLE_ATTRIBUTE,
+        Console(force_terminal=enable_color, no_color=not enable_color),
+    )
     config_path, history_dir = _project(tmp_path)
     destination = tmp_path / OUTPUT_NAME
     result = _invoke(
@@ -366,7 +558,7 @@ def test_insights_command_writes_a_file_and_keeps_terminal_output(
         str(destination),
     )
     assert result.exit_code == EXIT_SUCCESS
-    assert TITLE_TEXT in result.stdout
+    assert TITLE_TEXT in _plain(result.stdout)
     assert WROTE_TEXT in result.stdout
     written = json.loads(destination.read_text(encoding=ENCODING))
     assert written["reports_inspected"] == THREE
@@ -501,11 +693,12 @@ def test_insights_command_rejects_a_directory_output(tmp_path: Path) -> None:
     assert IS_DIRECTORY_TEXT in _plain(result.output)
 
 
-def test_insights_command_rejects_a_missing_output_directory(
+def test_insights_command_creates_a_missing_output_directory(
     tmp_path: Path,
 ) -> None:
-    """An output path inside a missing directory is rejected."""
+    """An output path inside a missing directory creates that directory."""
     config_path, history_dir = _project(tmp_path)
+    destination = tmp_path / SAVE_DIR_NAME / NESTED_DIR_NAME / OUTPUT_NAME
     result = _invoke(
         INSIGHTS_COMMAND,
         CONFIG_FLAG,
@@ -513,10 +706,263 @@ def test_insights_command_rejects_a_missing_output_directory(
         HISTORY_DIR_FLAG,
         str(history_dir),
         OUTPUT_FLAG,
-        str(tmp_path / MISSING_CONFIG_NAME / OUTPUT_NAME),
+        str(destination),
     )
-    assert result.exit_code != EXIT_SUCCESS
-    assert NO_DIRECTORY_TEXT in _plain(result.output)
+    assert result.exit_code == EXIT_SUCCESS
+    assert destination.is_file()
+
+
+def test_insights_command_saves_into_the_output_directory(
+    tmp_path: Path,
+) -> None:
+    """Saving writes a named report into a directory created on demand."""
+    config_path, history_dir = _project(tmp_path)
+    save_dir = tmp_path / SAVE_DIR_NAME
+    result = _invoke(
+        INSIGHTS_COMMAND,
+        CONFIG_FLAG,
+        str(config_path),
+        HISTORY_DIR_FLAG,
+        str(history_dir),
+        FORMAT_FLAG,
+        InsightsFormat.JSON.value,
+        SAVE_FLAG,
+        OUTPUT_DIR_FLAG,
+        str(save_dir),
+    )
+    assert result.exit_code == EXIT_SUCCESS
+    saved = save_dir / SAVED_JSON_NAME
+    assert saved.is_file()
+    assert (
+        json.loads(saved.read_text(encoding=ENCODING))["reports_inspected"]
+        == THREE
+    )
+
+
+def test_insights_command_saves_text_under_a_text_filename(
+    tmp_path: Path,
+) -> None:
+    """Saving a text analysis names the file for the text format."""
+    config_path, history_dir = _project(tmp_path)
+    save_dir = tmp_path / SAVE_DIR_NAME
+    result = _invoke(
+        INSIGHTS_COMMAND,
+        CONFIG_FLAG,
+        str(config_path),
+        HISTORY_DIR_FLAG,
+        str(history_dir),
+        SAVE_FLAG,
+        OUTPUT_DIR_FLAG,
+        str(save_dir),
+    )
+    assert result.exit_code == EXIT_SUCCESS
+    assert (save_dir / SAVED_TEXT_NAME).is_file()
+
+
+def test_insights_command_rejects_saving_with_an_output_path(
+    tmp_path: Path,
+) -> None:
+    """Choosing both a saved directory and an output path is rejected."""
+    config_path, history_dir = _project(tmp_path)
+    result = _invoke(
+        INSIGHTS_COMMAND,
+        CONFIG_FLAG,
+        str(config_path),
+        HISTORY_DIR_FLAG,
+        str(history_dir),
+        SAVE_FLAG,
+        OUTPUT_FLAG,
+        str(tmp_path / OUTPUT_NAME),
+    )
+    assert result.exit_code == EXIT_FAILURE
+    assert CANNOT_COMBINE_TEXT in _plain(result.stdout)
+
+
+def test_validate_insights_input_allows_none_and_existing_files(
+    tmp_path: Path,
+) -> None:
+    """An omitted path is allowed and an existing file passes unchanged."""
+    assert validate_insights_input(None) is None
+    saved = tmp_path / SAVED_REPORT_NAME
+    saved.write_text(NOT_AN_OBJECT_JSON, encoding=ENCODING)
+    assert validate_insights_input(saved) == saved
+
+
+def test_validate_insights_input_rejects_a_directory(tmp_path: Path) -> None:
+    """A directory is not a saved report."""
+    with pytest.raises(BadParameter):
+        validate_insights_input(tmp_path)
+
+
+def test_validate_insights_input_rejects_a_missing_file(
+    tmp_path: Path,
+) -> None:
+    """A path that does not exist is rejected before any reading happens."""
+    with pytest.raises(BadParameter):
+        validate_insights_input(tmp_path / SAVED_REPORT_NAME)
+
+
+def test_load_insights_report_reads_a_saved_report(tmp_path: Path) -> None:
+    """A report written by the command loads back into the same model."""
+    config_path, history_dir = _project(tmp_path)
+    report = _build_history_insights(config_path, None, THREE, history_dir)
+    saved = tmp_path / SAVED_REPORT_NAME
+    saved.write_text(report.model_dump_json(), encoding=ENCODING)
+    assert _load_insights_report(saved) == report
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        UNPARSABLE_JSON,
+        NOT_AN_OBJECT_JSON,
+        MISSING_FIELD_JSON,
+        WRONG_TYPE_JSON,
+        BAD_CHECK_ENTRY_JSON,
+    ],
+)
+def test_load_insights_report_rejects_malformed_files(
+    tmp_path: Path,
+    contents: str,
+) -> None:
+    """Every structurally invalid report exits instead of raising."""
+    saved = tmp_path / SAVED_REPORT_NAME
+    saved.write_text(contents, encoding=ENCODING)
+    with pytest.raises(typer.Exit):
+        _load_insights_report(saved)
+
+
+def test_load_insights_report_reports_an_unreadable_file(
+    tmp_path: Path,
+) -> None:
+    """A path that cannot be read exits without a traceback."""
+    with pytest.raises(typer.Exit):
+        _load_insights_report(tmp_path)
+
+
+def test_insights_command_replays_a_saved_report(tmp_path: Path) -> None:
+    """A report written with output can be rendered again with input."""
+    config_path, history_dir = _project(tmp_path)
+    saved = tmp_path / SAVED_REPORT_NAME
+    written = _invoke(
+        INSIGHTS_COMMAND,
+        CONFIG_FLAG,
+        str(config_path),
+        HISTORY_DIR_FLAG,
+        str(history_dir),
+        FORMAT_FLAG,
+        InsightsFormat.JSON.value,
+        OUTPUT_FLAG,
+        str(saved),
+    )
+    assert written.exit_code == EXIT_SUCCESS
+    replayed = _invoke(INSIGHTS_COMMAND, INPUT_FLAG, str(saved))
+    assert replayed.exit_code == EXIT_SUCCESS
+    assert TITLE_TEXT in replayed.stdout
+    assert NAME_ALPHA in replayed.stdout
+
+
+def test_insights_command_replays_a_saved_report_as_json(
+    tmp_path: Path,
+) -> None:
+    """Replaying with JSON output reproduces the saved report exactly."""
+    config_path, history_dir = _project(tmp_path)
+    saved = tmp_path / SAVED_REPORT_NAME
+    _invoke(
+        INSIGHTS_COMMAND,
+        CONFIG_FLAG,
+        str(config_path),
+        HISTORY_DIR_FLAG,
+        str(history_dir),
+        FORMAT_FLAG,
+        InsightsFormat.JSON.value,
+        OUTPUT_FLAG,
+        str(saved),
+    )
+    result = _invoke(
+        INSIGHTS_COMMAND,
+        INPUT_FLAG,
+        str(saved),
+        FORMAT_FLAG,
+        InsightsFormat.JSON.value,
+    )
+    assert result.exit_code == EXIT_SUCCESS
+    original = InsightsReport.model_validate_json(
+        saved.read_text(encoding=ENCODING)
+    )
+    assert InsightsReport.model_validate_json(result.stdout) == original
+
+
+def test_insights_command_rejects_a_malformed_saved_report(
+    tmp_path: Path,
+) -> None:
+    """A corrupt saved report fails with a message and no traceback."""
+    saved = tmp_path / SAVED_REPORT_NAME
+    saved.write_text(UNPARSABLE_JSON, encoding=ENCODING)
+    result = _invoke(INSIGHTS_COMMAND, INPUT_FLAG, str(saved))
+    assert result.exit_code == EXIT_FAILURE
+    assert NOT_A_REPORT_TEXT in _plain(result.stdout)
+
+
+def test_insights_command_rejects_input_combined_with_last(
+    tmp_path: Path,
+) -> None:
+    """Analyzing a saved report cannot be narrowed by a history option."""
+    config_path, history_dir = _project(tmp_path)
+    saved = tmp_path / SAVED_REPORT_NAME
+    saved.write_text(
+        _build_history_insights(
+            config_path, None, THREE, history_dir
+        ).model_dump_json(),
+        encoding=ENCODING,
+    )
+    result = _invoke(
+        INSIGHTS_COMMAND,
+        INPUT_FLAG,
+        str(saved),
+        LAST_FLAG,
+        str(ONE),
+    )
+    assert result.exit_code == EXIT_FAILURE
+    assert CANNOT_COMBINE_TEXT in _plain(result.stdout)
+
+
+def test_insights_command_rejects_input_combined_with_history_dir(
+    tmp_path: Path,
+) -> None:
+    """Analyzing a saved report cannot be pointed at a history directory."""
+    config_path, history_dir = _project(tmp_path)
+    saved = tmp_path / SAVED_REPORT_NAME
+    saved.write_text(
+        _build_history_insights(
+            config_path, None, THREE, history_dir
+        ).model_dump_json(),
+        encoding=ENCODING,
+    )
+    result = _invoke(
+        INSIGHTS_COMMAND,
+        INPUT_FLAG,
+        str(saved),
+        HISTORY_DIR_FLAG,
+        str(history_dir),
+    )
+    assert result.exit_code == EXIT_FAILURE
+    assert CANNOT_COMBINE_TEXT in _plain(result.stdout)
+
+
+def test_insights_command_accepts_the_instructor_flag(tmp_path: Path) -> None:
+    """The instructor flag is accepted and the command still succeeds."""
+    config_path, history_dir = _project(tmp_path)
+    result = _invoke(
+        INSIGHTS_COMMAND,
+        CONFIG_FLAG,
+        str(config_path),
+        HISTORY_DIR_FLAG,
+        str(history_dir),
+        INSTRUCTOR_FLAG,
+    )
+    assert result.exit_code == EXIT_SUCCESS
+    assert TITLE_TEXT in result.stdout
 
 
 def test_insights_command_runs_no_checks_or_configuration_parsing(
@@ -541,4 +987,4 @@ def test_insights_command_runs_no_checks_or_configuration_parsing(
         str(history_dir),
     )
     assert result.exit_code == EXIT_SUCCESS
-    assert TITLE_TEXT in result.stdout
+    assert TITLE_TEXT in _plain(result.stdout)

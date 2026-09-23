@@ -1,6 +1,7 @@
 """Analyze saved report history to produce deterministic check insights."""
 
 from pathlib import Path
+from textwrap import wrap
 from typing import Any
 
 from pydantic import BaseModel
@@ -61,29 +62,61 @@ DUPLICATE_CHECK_DETAIL = (
 # text rendering pieces
 JSON_INDENT = 2
 NEWLINE = "\n"
-TEXT_TITLE = "GatorGrade Insights"
 TEXT_SCOPE = "Scope: {}"
 TEXT_REPORTS = "Reports inspected: {} of {} available"
 TEXT_NO_REPORTS = "No valid history reports were found for this project."
 TEXT_NO_CHECKS = "No checks were observed in the inspected reports."
-TEXT_CHECKS_HEADER = "Checks ({}):"
-TEXT_CHECK_NAME = "- {}"
-TEXT_CHECK_ID = "  id: {}"
-TEXT_CHECK_COUNTS = "  observations: {}  passes: {}  pass rate: {:.2%}"
-TEXT_CHECK_LATEST = "  latest: {}  current streak: {} {}"
-TEXT_CHECK_TREND = "  trend: {}"
-TEXT_CHECK_TREND_DELTA = "  trend: {} (delta {:+.4f})"
 TEXT_STATUS_PASS = "pass"
 TEXT_STATUS_FAIL = "fail"
 TEXT_STREAK_PASSING = "passing"
 TEXT_STREAK_FAILING = "failing"
-TEXT_BEST = "Best check: {}"
-TEXT_WORST = "Worst check: {}"
-TEXT_NO_RANKING = "none (no check has at least {} observations)"
-TEXT_OTHER_SCOPE = "Reports from other projects ignored: {}"
 TEXT_DIAGNOSTICS_HEADER = "Diagnostics ({}):"
 TEXT_DIAGNOSTIC = "- {} {}: {} ({})"
 TEXT_EMPTY = ""
+STRUGGLE_THRESHOLD = 0.85
+COLUMN_WIDTHS = (4, 6, 6, 10, 12, 12, 7)
+FOCUS_COLUMN_WIDTHS = (4, 6, 20)
+CHECK_NAME_WIDTH = 48
+TABLE_PADDING = 2
+TABLE_CORNER = "+"
+TABLE_HORIZONTAL = "-"
+TABLE_CELL_SEPARATOR = " | "
+TABLE_ROW_START = "| "
+TABLE_ROW_END = " |"
+IDENTIFIER_WIDTH = 12
+# every heading rule and the threshold wording are derived rather than
+# typed out, so that a reworded heading cannot drift out of alignment and
+# a changed threshold cannot leave the text claiming the old percentage
+TITLE_WORDS = "GatorGrade Insights"
+TITLE_RULE_WIDTH = 33
+TEXT_TITLE = (
+    f"{TABLE_HORIZONTAL * TITLE_RULE_WIDTH} {TITLE_WORDS} "
+    f"{TABLE_HORIZONTAL * TITLE_RULE_WIDTH}"
+)
+STRUGGLE_PERCENT = f"{STRUGGLE_THRESHOLD:.0%}"
+TEXT_FOCUS_HEADER = f"FOCUS ON THESE (passing under {STRUGGLE_PERCENT})"
+TEXT_FOCUS_UNDERLINE = TABLE_HORIZONTAL * len(TEXT_FOCUS_HEADER)
+TEXT_NO_FOCUS = (
+    f"Nothing to focus on: all checks are passing at least {STRUGGLE_PERCENT}."
+)
+TEXT_ALL_HEADER = "ALL CHECKS (worst first)"
+TEXT_ALL_UNDERLINE = TABLE_HORIZONTAL * len(TEXT_ALL_HEADER)
+TEXT_COLUMNS = ("RATE", "PASSED", "LATEST", "STREAK", "TREND")
+TEXT_DETAIL_COLUMNS = ("ID", "DELTA")
+TEXT_NAME_COLUMN = "CHECK"
+TEXT_COUNTS = "{}/{}"
+TEXT_RATE = "{:.0%}"
+TEXT_STREAK = "{} {}"
+TEXT_FOCUS_COLUMNS = ("RATE", "PASSED", "RECENT")
+TEXT_FAILING = "{} failing in a row"
+TEXT_LATEST = "latest {}"
+TEXT_DELTA = "{:+.4f}"
+TEXT_NO_DELTA = "-"
+TEXT_INSUFFICIENT = "insufficient"
+TEXT_SKIPPED = "Skipped {} history files ({} from other projects, {} other)"
+TEXT_WARNINGS = "Report/check diagnostics: {}"
+ASCII_ENCODING = "ascii"
+ASCII_ERRORS = "backslashreplace"
 
 
 class CheckObservation(BaseModel):
@@ -445,68 +478,158 @@ def _status_label(status: bool) -> str:
     return TEXT_STATUS_PASS if status else TEXT_STATUS_FAIL
 
 
-def _render_check(summary: CheckSummary) -> list[str]:
-    """Render the text lines that describe one check summary."""
-    if summary.current_pass_streak > 0:
-        streak_length = summary.current_pass_streak
-        streak_label = TEXT_STREAK_PASSING
-    else:
-        streak_length = summary.current_fail_streak
-        streak_label = TEXT_STREAK_FAILING
-    if summary.trend_delta is None:
-        trend_line = TEXT_CHECK_TREND.format(summary.trend)
-    else:
-        trend_line = TEXT_CHECK_TREND_DELTA.format(
-            summary.trend, summary.trend_delta
+def sort_checks_by_struggle(checks: list[CheckSummary]) -> list[CheckSummary]:
+    """Return checks in worst-first order without changing the input."""
+    return sorted(checks, key=_worst_sort_key)
+
+
+def struggling_checks(checks: list[CheckSummary]) -> list[CheckSummary]:
+    """Return checks passing strictly below the struggle threshold."""
+    return [check for check in checks if check.pass_rate < STRUGGLE_THRESHOLD]
+
+
+def _render_row(
+    fields: list[str],
+    name: str,
+    *,
+    widths: tuple[int, ...] = COLUMN_WIDTHS,
+) -> str:
+    """Wrap ASCII cells within aligned borders without truncating names."""
+    cell_widths = (*widths[: len(fields)], CHECK_NAME_WIDTH)
+    cells = [
+        wrap(
+            value.encode(ASCII_ENCODING, errors=ASCII_ERRORS).decode(
+                ASCII_ENCODING
+            ),
+            width=width,
+            break_on_hyphens=False,
         )
-    return [
-        TEXT_CHECK_NAME.format(summary.name),
-        TEXT_CHECK_ID.format(summary.identifier),
-        TEXT_CHECK_COUNTS.format(
-            summary.observations, summary.passes, summary.pass_rate
-        ),
-        TEXT_CHECK_LATEST.format(
-            _status_label(summary.latest_status),
-            streak_length,
-            streak_label,
-        ),
-        trend_line,
+        or [TEXT_EMPTY]
+        for value, width in zip([*fields, name], cell_widths, strict=True)
     ]
+    return NEWLINE.join(
+        TABLE_ROW_START
+        + TABLE_CELL_SEPARATOR.join(
+            (cell[index] if index < len(cell) else TEXT_EMPTY).ljust(width)
+            for cell, width in zip(cells, cell_widths, strict=True)
+        )
+        + TABLE_ROW_END
+        for index in range(max(len(cell) for cell in cells))
+    )
 
 
-def _check_name_for(report: InsightsReport, identifier: str | None) -> str:
-    """Return the display name for a ranked check identifier."""
-    if identifier is None:
-        return TEXT_NO_RANKING.format(INSIGHTS_MIN_RANK_OBS)
-    for summary in report.checks:
-        if summary.identifier == identifier:
-            return summary.name
-    return identifier
+def _render_table(
+    columns: tuple[str, ...],
+    rows: list[str],
+    *,
+    widths: tuple[int, ...] = COLUMN_WIDTHS,
+) -> list[str]:
+    """Add ASCII borders and a heading to wrapped table rows."""
+    border = (
+        TABLE_CORNER
+        + TABLE_CORNER.join(
+            TABLE_HORIZONTAL * (width + TABLE_PADDING)
+            for width in (*widths[: len(columns)], CHECK_NAME_WIDTH)
+        )
+        + TABLE_CORNER
+    )
+    lines = [
+        border,
+        _render_row(list(columns), TEXT_NAME_COLUMN, widths=widths),
+        border,
+    ]
+    for row in rows:
+        lines.extend([row, border])
+    return lines
 
 
-def _render_diagnostics(report: InsightsReport) -> list[str]:
-    """Render the diagnostics, keeping other-project reports quiet."""
-    other_scope_count = 0
-    visible: list[HistoryDiagnostic] = []
-    for diagnostic in report.diagnostics:
-        if diagnostic.reason == HISTORY_SKIP_DIFFERENT_SCOPE:
-            other_scope_count += 1
-        else:
-            visible.append(diagnostic)
-    lines: list[str] = []
-    if other_scope_count > 0:
-        lines.append(TEXT_OTHER_SCOPE.format(other_scope_count))
-    if visible:
-        lines.append(TEXT_DIAGNOSTICS_HEADER.format(len(visible)))
-        lines.extend(
+def _render_check(summary: CheckSummary, *, instructor: bool = False) -> str:
+    """Render one aligned row with the complete check name last."""
+    streak_length = summary.current_pass_streak or summary.current_fail_streak
+    streak_label = (
+        TEXT_STREAK_PASSING
+        if summary.current_pass_streak
+        else TEXT_STREAK_FAILING
+    )
+    trend = (
+        TEXT_INSUFFICIENT
+        if summary.trend == TREND_INSUFFICIENT_DATA
+        else summary.trend
+    )
+    fields = [
+        TEXT_RATE.format(summary.pass_rate),
+        TEXT_COUNTS.format(summary.passes, summary.observations),
+        _status_label(summary.latest_status),
+        TEXT_STREAK.format(streak_length, streak_label),
+        trend,
+    ]
+    if instructor:
+        delta = (
+            TEXT_NO_DELTA
+            if summary.trend_delta is None
+            else TEXT_DELTA.format(summary.trend_delta)
+        )
+        fields.extend([summary.identifier[:IDENTIFIER_WIDTH], delta])
+    return _render_row(fields, summary.name)
+
+
+def _render_focus(summary: CheckSummary) -> str:
+    """Render one actionable focus entry."""
+    detail = TEXT_LATEST.format(_status_label(summary.latest_status))
+    if summary.current_fail_streak:
+        detail = TEXT_FAILING.format(summary.current_fail_streak)
+    elif summary.trend == TREND_IMPROVING:
+        detail = TREND_IMPROVING
+    return _render_row(
+        [
+            TEXT_RATE.format(summary.pass_rate),
+            TEXT_COUNTS.format(summary.passes, summary.observations),
+            detail,
+        ],
+        summary.name,
+        widths=FOCUS_COLUMN_WIDTHS,
+    )
+
+
+def _render_diagnostics(
+    report: InsightsReport,
+    *,
+    instructor: bool = False,
+) -> list[str]:
+    """Render concise student counts or complete instructor diagnostics."""
+    if not report.diagnostics:
+        return []
+    if instructor:
+        return [TEXT_DIAGNOSTICS_HEADER.format(len(report.diagnostics))] + [
             TEXT_DIAGNOSTIC.format(
                 diagnostic.kind,
                 diagnostic.source,
                 diagnostic.detail,
                 diagnostic.reason,
             )
-            for diagnostic in visible
+            for diagnostic in report.diagnostics
+        ]
+    files = [
+        diagnostic
+        for diagnostic in report.diagnostics
+        if diagnostic.kind == DIAGNOSTIC_KIND_FILE
+    ]
+    other_scope = sum(
+        diagnostic.reason == HISTORY_SKIP_DIFFERENT_SCOPE
+        for diagnostic in files
+    )
+    lines = []
+    if files:
+        lines.append(
+            TEXT_SKIPPED.format(
+                len(files),
+                other_scope,
+                len(files) - other_scope,
+            )
         )
+    warnings = len(report.diagnostics) - len(files)
+    if warnings:
+        lines.append(TEXT_WARNINGS.format(warnings))
     return lines
 
 
@@ -515,38 +638,63 @@ def render_text(
     *,
     instructor: bool = False,
 ) -> str:
-    """Render an insights report as deterministic plain text."""
-    # the instructor parameter is accepted now so that the command line can
-    # pass it through while the detailed rendering is still being written;
-    # it is deliberately ignored until that rendering lands
+    """Render an insights report as deterministic ASCII plain text."""
     lines = [
-        TEXT_TITLE,
-        TEXT_SCOPE.format(report.scope),
-        TEXT_REPORTS.format(
-            report.reports_inspected, report.reports_available
-        ),
         TEXT_EMPTY,
+        TEXT_TITLE,
+        TEXT_REPORTS.format(report.reports_inspected, report.reports_available)
+        .center(len(TEXT_TITLE))
+        .rstrip(),
     ]
+    if instructor:
+        lines.append(TEXT_SCOPE.format(report.scope))
+    lines.append(TEXT_EMPTY)
     if report.reports_inspected == 0:
         lines.append(TEXT_NO_REPORTS)
     elif not report.checks:
         lines.append(TEXT_NO_CHECKS)
     else:
-        lines.append(TEXT_CHECKS_HEADER.format(len(report.checks)))
-        for summary in report.checks:
-            lines.extend(_render_check(summary))
-        lines.append(TEXT_EMPTY)
-        lines.append(
-            TEXT_BEST.format(_check_name_for(report, report.best_check))
+        checks = sort_checks_by_struggle(report.checks)
+        focus = struggling_checks(checks)
+        if focus:
+            lines.append(TEXT_FOCUS_HEADER)
+            lines.append(TEXT_FOCUS_UNDERLINE)
+            lines.extend(
+                _render_table(
+                    TEXT_FOCUS_COLUMNS,
+                    [_render_focus(summary) for summary in focus],
+                    widths=FOCUS_COLUMN_WIDTHS,
+                )
+            )
+        else:
+            lines.append(TEXT_NO_FOCUS)
+        columns = list(TEXT_COLUMNS)
+        if instructor:
+            columns.extend(TEXT_DETAIL_COLUMNS)
+        lines.extend(
+            [
+                TEXT_EMPTY,
+                TEXT_ALL_HEADER,
+                TEXT_ALL_UNDERLINE,
+            ]
         )
-        lines.append(
-            TEXT_WORST.format(_check_name_for(report, report.worst_check))
+        lines.extend(
+            _render_table(
+                tuple(columns),
+                [
+                    _render_check(summary, instructor=instructor)
+                    for summary in checks
+                ],
+            )
         )
-    diagnostic_lines = _render_diagnostics(report)
+    diagnostic_lines = _render_diagnostics(report, instructor=instructor)
     if diagnostic_lines:
         lines.append(TEXT_EMPTY)
         lines.extend(diagnostic_lines)
-    return NEWLINE.join(lines) + NEWLINE
+    text = NEWLINE.join(lines) + NEWLINE
+    return text.encode(ASCII_ENCODING, errors=ASCII_ERRORS).decode(
+        ASCII_ENCODING
+    )
 
 
 def render_json(report: InsightsReport) -> str:
