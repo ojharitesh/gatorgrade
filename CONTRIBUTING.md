@@ -172,6 +172,9 @@ passing and failing checks. It is a test fixture, not a complete manual test
 suite. Exercise your change with a disposable assignment copy or temporary
 configuration and describe the expected result in your pull request.
 
+For the separate local-hook prototype, see
+[pre-commit setup](docs/PRE_COMMIT.md). Hooks are installed per clone.
+
 ## Coding standards
 
 These requirements also apply to test functions and Python tools in scripts/.

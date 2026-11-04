@@ -97,6 +97,8 @@ jobs:
         run: uv sync --dev --extra auto-hint
       - name: Execute tests
         run: uv run task test
+      - name: Check direct-test coverage
+        run: uv run task test-coverage-check
 
   coverage:
     name: Test Coverage (Python ${{ matrix.python-version }})
